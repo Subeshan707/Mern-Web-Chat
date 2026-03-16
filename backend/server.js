@@ -27,6 +27,9 @@ const io = socketIO(server, {
   }
 });
 
+// Make io accessible to controllers via req.app.get('io')
+app.set('io', io);
+
 // Connect to MongoDB
 connectDB();
 

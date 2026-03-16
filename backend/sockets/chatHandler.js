@@ -4,14 +4,14 @@ const User = require('../models/User');
 module.exports = (io, socket) => {
   // Join conversation room
   socket.on('join_conversation', ({ userId }) => {
-    const roomId = [socket.user._id, userId].sort().join('_');
+    const roomId = [socket.user._id.toString(), userId.toString()].sort().join('_');
     socket.join(roomId);
     console.log(`${socket.user.username} joined room: ${roomId}`);
   });
 
   // Leave conversation room
   socket.on('leave_conversation', ({ userId }) => {
-    const roomId = [socket.user._id, userId].sort().join('_');
+    const roomId = [socket.user._id.toString(), userId.toString()].sort().join('_');
     socket.leave(roomId);
   });
 
@@ -37,7 +37,7 @@ module.exports = (io, socket) => {
         .populate('receiverId', 'username profilePicture');
 
       // Create room ID for conversation
-      const roomId = [socket.user._id, receiverId].sort().join('_');
+      const roomId = [socket.user._id.toString(), receiverId.toString()].sort().join('_');
 
       // Emit to room (both sender and receiver)
       io.to(roomId).emit('receive_message', populatedMessage);
@@ -67,7 +67,7 @@ module.exports = (io, socket) => {
 
   // Typing indicator
   socket.on('typing', ({ receiverId, isTyping }) => {
-    const roomId = [socket.user._id, receiverId].sort().join('_');
+    const roomId = [socket.user._id.toString(), receiverId.toString()].sort().join('_');
     socket.to(roomId).emit('user_typing', {
       userId: socket.user._id,
       username: socket.user.username,

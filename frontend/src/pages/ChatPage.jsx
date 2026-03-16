@@ -12,7 +12,9 @@ function byNewest(a, b) {
 export default function ChatPage() {
   const { user, token, logout, updateCurrentUser } = useAuth();
   const socketRef = useRef(null);
+  const lastPeerIdRef = useRef(null);
   const typingTimerRef = useRef(null);
+  const selectedUserRef = useRef(null);
 
   const [friends, setFriends] = useState([]);
   const [recentConversations, setRecentConversations] = useState([]);
@@ -36,24 +38,26 @@ export default function ChatPage() {
     loadFriendsAndRecents();
   }, []);
 
+  // Only bind socket listeners once per token
   useEffect(() => {
     if (!token) return;
 
     const socket = io(SOCKET_BASE_URL, { auth: { token } });
     socketRef.current = socket;
 
-    socket.on("connect_error", () => {
+    socket.on("connect_error", (err) => {
       setError("Socket authentication failed. Please log in again.");
     });
 
     socket.on("receive_message", (message) => {
       const peerId =
         message.senderId._id === user._id ? message.receiverId._id : message.senderId._id;
-
-      if (selectedUser?._id === peerId) {
-        setMessages((prev) => [...prev, message]);
+      if (selectedUserRef.current?._id === peerId) {
+        setMessages((prev) => {
+          if (prev.some((m) => m._id === message._id)) return prev;
+          return [...prev, message];
+        });
       }
-
       void refreshRecents();
     });
 
@@ -72,10 +76,15 @@ export default function ChatPage() {
     });
 
     return () => {
+      // Leave any joined room on disconnect
+      if (lastPeerIdRef.current && socketRef.current) {
+        socketRef.current.emit("leave_conversation", { userId: lastPeerIdRef.current });
+      }
       socket.disconnect();
       socketRef.current = null;
     };
-  }, [token, selectedUser?._id]);
+    // eslint-disable-next-line
+  }, [token]);
 
   useEffect(() => {
     if (!searchQuery.trim()) {
@@ -132,7 +141,12 @@ export default function ChatPage() {
   };
 
   const openConversation = async (peer) => {
+    // Leave previous room if any
+    if (lastPeerIdRef.current && socketRef.current) {
+      socketRef.current.emit("leave_conversation", { userId: lastPeerIdRef.current });
+    }
     setSelectedUser(peer);
+    selectedUserRef.current = peer;
     setTypingLabel("");
     setIsBusy((prev) => ({ ...prev, messages: true }));
 
@@ -143,6 +157,7 @@ export default function ChatPage() {
 
       if (socketRef.current) {
         socketRef.current.emit("join_conversation", { userId: peer._id });
+        lastPeerIdRef.current = peer._id;
       }
     } catch (err) {
       setError(err?.response?.data?.message || "Failed to load conversation.");
@@ -153,34 +168,54 @@ export default function ChatPage() {
 
   const onSendMessage = async (event) => {
     event.preventDefault();
-    if (!selectedUser || isBusy.send) return;
+    if (!selectedUser) return;
 
     const trimmed = draft.trim();
     if (!trimmed && !imageFile) return;
 
-    setIsBusy((prev) => ({ ...prev, send: true }));
+    // Create optimistic message for instant display
+    const tempId = `temp_${Date.now()}`;
+    const optimisticMsg = {
+      _id: tempId,
+      senderId: { _id: user._id, username: user.username, profilePicture: user.profilePicture },
+      receiverId: { _id: selectedUser._id, username: selectedUser.username },
+      messageType: imageFile ? "image" : "text",
+      messageContent: trimmed,
+      imageUrl: imageFile ? URL.createObjectURL(imageFile) : undefined,
+      createdAt: new Date().toISOString(),
+      _optimistic: true,
+    };
+
+    // Show message instantly & clear input
+    setMessages((prev) => [...prev, optimisticMsg]);
+    setDraft("");
+    const sentImage = imageFile;
+    setImageFile(null);
+
+    // Build form data and send in background
+    const formData = new FormData();
+    formData.append("receiverId", selectedUser._id);
+
+    if (sentImage) {
+      formData.append("messageType", "image");
+      formData.append("messageImage", sentImage);
+    } else {
+      formData.append("messageType", "text");
+      formData.append("messageContent", trimmed);
+    }
 
     try {
-      const formData = new FormData();
-      formData.append("receiverId", selectedUser._id);
-
-      if (imageFile) {
-        formData.append("messageType", "image");
-        formData.append("messageImage", imageFile);
-      } else {
-        formData.append("messageType", "text");
-        formData.append("messageContent", trimmed);
-      }
-
       const { data } = await api.sendMessage(formData);
-      setMessages((prev) => [...prev, data]);
-      setDraft("");
-      setImageFile(null);
-      await refreshRecents();
+      // Remove the temp message and any socket-delivered duplicate, then add the confirmed one
+      setMessages((prev) => {
+        const cleaned = prev.filter((m) => m._id !== tempId && m._id !== data._id);
+        return [...cleaned, data];
+      });
+      refreshRecents();
     } catch (err) {
+      // Remove the optimistic message on failure
+      setMessages((prev) => prev.filter((m) => m._id !== tempId));
       setError(err?.response?.data?.message || "Message could not be sent.");
-    } finally {
-      setIsBusy((prev) => ({ ...prev, send: false }));
     }
   };
 
@@ -237,94 +272,120 @@ export default function ChatPage() {
     return merged.sort(byNewest);
   }, [friends, recentConversations]);
 
+  const messagesEndRef = useRef(null);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
   return (
     <div className="chat-shell">
-      <aside className="sidebar reveal-up">
-        <header className="profile-block">
-          <div className="avatar-wrap">
-            <img
-              src={user?.profilePicture ? `${SOCKET_BASE_URL}${user.profilePicture}` : "https://placehold.co/72x72?text=You"}
-              alt="profile"
-            />
+      {/* ── Sidebar ──────────────────────────── */}
+      <aside className="sidebar">
+        <div className="sidebar-header">
+          <div className="sidebar-header-left">
+            <label className="sidebar-avatar" title="Update profile photo">
+              <img
+                src={user?.profilePicture ? `${SOCKET_BASE_URL}${user.profilePicture}` : "https://placehold.co/40x40/202c33/aebac1?text=" + (user?.username?.[0]?.toUpperCase() || "U")}
+                alt="profile"
+              />
+              <input type="file" accept="image/*" onChange={updateProfile} hidden />
+            </label>
+            <span className="sidebar-username">{user?.username}</span>
           </div>
-          <div>
-            <p className="eyebrow">Signed in as</p>
-            <h2>{user?.username}</h2>
+          <div className="sidebar-header-actions">
+            <button className="icon-btn" onClick={logout} type="button" title="Logout">
+              ⏻
+            </button>
           </div>
-        </header>
-
-        <div className="sidebar-actions">
-          <label className="file-pill">
-            {isBusy.profile ? "Uploading..." : "Update photo"}
-            <input type="file" accept="image/*" onChange={updateProfile} hidden />
-          </label>
-          <button className="btn-ghost" onClick={logout} type="button">
-            Logout
-          </button>
         </div>
 
-        <section className="search-panel">
+        <div className="search-bar">
           <input
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search users by username"
+            placeholder="🔍  Search or start new chat"
           />
-          {!!searchResults.length && (
-            <ul className="result-list">
-              {searchResults.map((item) => (
-                <li key={item._id}>
-                  <span>{item.username}</span>
-                  <button onClick={() => addFriend(item.username)} type="button">
-                    Add
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+        </div>
 
-        <section className="contacts">
-          <h3>Contacts</h3>
-          {isBusy.friends && <p className="muted">Syncing contacts...</p>}
-          {!isBusy.friends && !contacts.length && <p className="muted">No contacts yet. Add someone above.</p>}
-          <ul>
-            {contacts.map((contact) => (
-              <li
-                key={contact._id}
-                className={selectedUser?._id === contact._id ? "active" : ""}
-                onClick={() => openConversation(contact)}
-              >
-                <span className={`status-dot ${contact.online ? "online" : "offline"}`} />
-                <div>
-                  <p>{contact.username}</p>
-                  <small>{contact.online ? "online" : "last seen recently"}</small>
-                </div>
+        {!!searchResults.length && (
+          <ul className="search-results-dropdown">
+            {searchResults.map((item) => (
+              <li key={item._id}>
+                <span>{item.username}</span>
+                <button onClick={() => addFriend(item.username)} type="button">
+                  Add
+                </button>
               </li>
             ))}
           </ul>
-        </section>
+        )}
+
+        <div className="contact-list">
+          {isBusy.friends && <p className="no-contacts">Syncing contacts…</p>}
+          {!isBusy.friends && !contacts.length && (
+            <p className="no-contacts">No chats yet. Search for a user above to start a conversation.</p>
+          )}
+
+          {contacts.map((contact) => (
+            <div
+              key={contact._id}
+              className={`contact-item ${selectedUser?._id === contact._id ? "active" : ""}`}
+              onClick={() => openConversation(contact)}
+            >
+              <div className="contact-avatar">
+                <img
+                  src={contact.profilePicture ? `${SOCKET_BASE_URL}${contact.profilePicture}` : "https://placehold.co/49x49/202c33/aebac1?text=" + (contact.username?.[0]?.toUpperCase() || "?")}
+                  alt={contact.username}
+                />
+                {contact.online && <span className="online-badge" />}
+              </div>
+              <div className="contact-info">
+                <span className="contact-name">{contact.username}</span>
+                <span className="contact-last-seen">
+                  {contact.online ? "online" : "last seen recently"}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
       </aside>
 
-      <main className="conversation reveal-up-delay">
+      {/* ── Conversation ─────────────────────── */}
+      <main className="conversation">
         {!selectedUser && (
-          <div className="screen-center">
-            <h2>Choose a contact to start chatting</h2>
-            <p className="muted">Messages, images, and read states are connected to your live backend.</p>
+          <div className="empty-state">
+            <h2>WhatsApp Web</h2>
+            <p>Send and receive messages. Now with real-time delivery powered by Socket.IO.</p>
           </div>
         )}
 
         {selectedUser && (
           <>
             <header className="chat-header">
-              <div>
+              <div className="chat-header-avatar">
+                <img
+                  src={selectedUser.profilePicture ? `${SOCKET_BASE_URL}${selectedUser.profilePicture}` : "https://placehold.co/40x40/202c33/aebac1?text=" + (selectedUser.username?.[0]?.toUpperCase() || "?")}
+                  alt={selectedUser.username}
+                />
+              </div>
+              <div className="chat-header-info">
                 <h2>{selectedUser.username}</h2>
-                <p className="muted">{typingLabel || (peerMap.get(selectedUser._id)?.online ? "Online" : "Offline")}</p>
+                <p className={typingLabel ? "typing-text" : ""}>
+                  {typingLabel || (peerMap.get(selectedUser._id)?.online ? "online" : "offline")}
+                </p>
               </div>
             </header>
 
             <section className="message-list">
-              {isBusy.messages && <p className="muted">Loading conversation...</p>}
-              {!isBusy.messages && !messages.length && <p className="muted">No messages yet. Say hello.</p>}
+              {isBusy.messages && (
+                <div className="loading-messages">Loading messages…</div>
+              )}
+              {!isBusy.messages && !messages.length && (
+                <div className="no-messages">
+                  <span>No messages yet. Say hello 👋</span>
+                </div>
+              )}
 
               {messages.map((message) => {
                 const mine =
@@ -332,31 +393,24 @@ export default function ChatPage() {
 
                 const text = message.messageType === "text" ? message.messageContent : "";
                 const image = message.messageType === "image" ? message.imageUrl : "";
+                const imageSrc = message._optimistic ? image : `${SOCKET_BASE_URL}${image}`;
 
                 return (
                   <article key={message._id} className={`bubble ${mine ? "mine" : "theirs"}`}>
                     {!!text && <p>{text}</p>}
                     {!!image && (
-                      <img
-                        src={`${SOCKET_BASE_URL}${image}`}
-                        alt="message attachment"
-                        className="message-image"
-                      />
+                      <img src={imageSrc} alt="attachment" className="message-image" />
                     )}
-                    <small>{new Date(message.timestamp || message.createdAt).toLocaleTimeString()}</small>
+                    <small>{new Date(message.timestamp || message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small>
                   </article>
                 );
               })}
+              <div ref={messagesEndRef} />
             </section>
 
             <form className="composer" onSubmit={onSendMessage}>
-              <input
-                value={draft}
-                onChange={(e) => onTyping(e.target.value)}
-                placeholder="Write a message"
-              />
-              <label className="file-pill compact">
-                {imageFile ? imageFile.name.slice(0, 12) : "Image"}
+              <label className={`composer-attach ${imageFile ? "has-file" : ""}`} title="Attach image">
+                📎
                 <input
                   type="file"
                   accept="image/*"
@@ -364,8 +418,15 @@ export default function ChatPage() {
                   onChange={(e) => setImageFile(e.target.files?.[0] || null)}
                 />
               </label>
-              <button className="btn-primary" type="submit" disabled={isBusy.send}>
-                {isBusy.send ? "Sending..." : "Send"}
+              <div className="composer-input-wrap">
+                <input
+                  value={draft}
+                  onChange={(e) => onTyping(e.target.value)}
+                  placeholder="Type a message"
+                />
+              </div>
+              <button className="composer-send" type="submit" title="Send">
+                ➤
               </button>
             </form>
           </>

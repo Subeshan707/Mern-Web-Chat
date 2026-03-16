@@ -114,6 +114,13 @@ const sendMessage = async (req, res) => {
       .populate('receiverId', 'username profilePicture');
 
     res.status(201).json(populatedMessage);
+
+    // Emit real-time event to the conversation room
+    const io = req.app.get('io');
+    if (io) {
+      const roomId = [req.user._id.toString(), receiverId.toString()].sort().join('_');
+      io.to(roomId).emit('receive_message', populatedMessage);
+    }
   } catch (error) {
     console.error('Send message error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
