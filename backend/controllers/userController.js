@@ -15,7 +15,7 @@ const searchUsers = async (req, res) => {
     const users = await User.find({
       username: { $regex: query, $options: 'i' },
       _id: { $ne: req.user._id } // Exclude current user
-    }).select('username profilePicture online lastSeen').limit(10);
+    }).select('username profilePicture online lastSeen about').limit(10);
 
     res.json(users);
   } catch (error) {
@@ -30,7 +30,7 @@ const searchUsers = async (req, res) => {
 const getUserById = async (req, res) => {
   try {
     const user = await User.findById(req.params.userId)
-      .select('username profilePicture online lastSeen');
+      .select('username profilePicture online lastSeen about');
     
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
@@ -49,6 +49,7 @@ const getUserById = async (req, res) => {
 const updateProfile = async (req, res) => {
   try {
     const username = req.body.username && req.body.username.trim();
+    const about = req.body.about !== undefined ? req.body.about.trim() : undefined;
     const updates = {};
 
     if (username) {
@@ -58,6 +59,9 @@ const updateProfile = async (req, res) => {
       }
 
       updates.username = username;
+    }
+    if (about !== undefined) {
+      updates.about = about;
     }
     if (req.file) updates.profilePicture = `/uploads/profile-pictures/${req.file.filename}`;
 

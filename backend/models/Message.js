@@ -13,21 +13,33 @@ const messageSchema = new mongoose.Schema({
   },
   messageType: {
     type: String,
-    enum: ['text', 'image'],
+    enum: ['text', 'image', 'video', 'document', 'audio'],
     default: 'text'
   },
   messageContent: {
     type: String,
-    required: function() {
-      return this.messageType === 'text';
-    }
+    default: ''
   },
   imageUrl: {
-    type: String,
-    required: function() {
-      return this.messageType === 'image';
-    }
+    type: String
   },
+  replyTo: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Message',
+    default: null
+  },
+  deletedForEveryone: {
+    type: Boolean,
+    default: false
+  },
+  deletedFor: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  }],
+  starredBy: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  }],
   delivered: {
     type: Boolean,
     default: false

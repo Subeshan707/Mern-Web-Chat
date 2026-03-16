@@ -26,6 +26,10 @@ const userSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+  about: {
+    type: String,
+    default: 'Hey there! I am using WhatsApp'
+  },
   online: {
     type: Boolean,
     default: false

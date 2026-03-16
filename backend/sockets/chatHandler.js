@@ -6,7 +6,6 @@ module.exports = (io, socket) => {
   socket.on('join_conversation', ({ userId }) => {
     const roomId = [socket.user._id.toString(), userId.toString()].sort().join('_');
     socket.join(roomId);
-    console.log(`${socket.user.username} joined room: ${roomId}`);
   });
 
   // Leave conversation room
@@ -18,37 +17,34 @@ module.exports = (io, socket) => {
   // Send message
   socket.on('send_message', async (data) => {
     try {
-      const { receiverId, messageType, messageContent, imageUrl } = data;
+      const { receiverId, messageType, messageContent, imageUrl, replyTo } = data;
 
-      // Create message in database
       const message = await Message.create({
         senderId: socket.user._id,
         receiverId,
         messageType,
-        messageContent: messageType === 'text' ? messageContent : '',
+        messageContent: messageContent || '',
         imageUrl: messageType === 'image' ? imageUrl : undefined,
+        replyTo: replyTo || null,
         delivered: false,
         read: false
       });
 
-      // Populate sender info
       const populatedMessage = await Message.findById(message._id)
         .populate('senderId', 'username profilePicture')
-        .populate('receiverId', 'username profilePicture');
+        .populate('receiverId', 'username profilePicture')
+        .populate({
+          path: 'replyTo',
+          select: 'messageContent messageType imageUrl senderId',
+          populate: { path: 'senderId', select: 'username' }
+        });
 
-      // Create room ID for conversation
       const roomId = [socket.user._id.toString(), receiverId.toString()].sort().join('_');
-
-      // Emit to room (both sender and receiver)
       io.to(roomId).emit('receive_message', populatedMessage);
 
-      // Check if receiver is online
       const receiver = await User.findById(receiverId);
       if (receiver && receiver.online) {
-        // Update delivered status
         await Message.findByIdAndUpdate(message._id, { delivered: true });
-        
-        // Notify about new message
         io.to(receiverId.toString()).emit('new_message_notification', {
           fromUser: {
             _id: socket.user._id,
@@ -58,7 +54,6 @@ module.exports = (io, socket) => {
           message: populatedMessage
         });
       }
-
     } catch (error) {
       console.error('Send message error:', error);
       socket.emit('message_error', { error: 'Failed to send message' });
@@ -84,10 +79,9 @@ module.exports = (io, socket) => {
           receiverId: socket.user._id,
           read: false
         },
-        { read: true }
+        { read: true, delivered: true }
       );
 
-      // Notify sender that messages were read
       io.to(senderId.toString()).emit('messages_read', {
         readerId: socket.user._id,
         timestamp: new Date()
@@ -103,6 +97,27 @@ module.exports = (io, socket) => {
       await Message.findByIdAndUpdate(messageId, { delivered: true });
     } catch (error) {
       console.error('Message delivered error:', error);
+    }
+  });
+
+  // Delete message for everyone (real-time)
+  socket.on('delete_message', async ({ messageId }) => {
+    try {
+      const message = await Message.findById(messageId);
+      if (!message) return;
+
+      if (message.senderId.toString() !== socket.user._id.toString()) return;
+
+      message.deletedForEveryone = true;
+      message.messageContent = '';
+      message.imageUrl = '';
+      await message.save();
+
+      const receiverId = message.receiverId.toString();
+      const roomId = [socket.user._id.toString(), receiverId].sort().join('_');
+      io.to(roomId).emit('message_deleted', { messageId, forEveryone: true });
+    } catch (error) {
+      console.error('Delete message error:', error);
     }
   });
 };

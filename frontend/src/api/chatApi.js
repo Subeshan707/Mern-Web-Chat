@@ -14,6 +14,7 @@ export const api = {
     http.put("/users/profile", formData, {
       headers: { "Content-Type": "multipart/form-data" },
     }),
+  updateAbout: (about) => http.put("/users/profile", { about }),
 
   addFriend: (payload) => http.post("/friends/add", payload),
   getFriends: () => http.get("/friends"),
@@ -28,4 +29,9 @@ export const api = {
       headers: { "Content-Type": "multipart/form-data" },
     }),
   markRead: (userId) => http.put(`/messages/read/${userId}`),
+  deleteMessage: (messageId, forEveryone = false) =>
+    http.delete(`/messages/${messageId}`, { data: { forEveryone } }),
+  toggleStar: (messageId) => http.put(`/messages/star/${messageId}`),
+  searchMessages: (userId, query) =>
+    http.get(`/messages/search/${userId}?q=${encodeURIComponent(query)}`),
 };

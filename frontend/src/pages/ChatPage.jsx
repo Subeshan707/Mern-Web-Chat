@@ -1,12 +1,61 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { io } from "socket.io-client";
 import { api } from "../api/chatApi";
 import { useAuth } from "../context/AuthContext";
 
 const SOCKET_BASE_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:5000";
 
+const EMOJIS = [
+  "😀","😂","😍","🥰","😘","😎","🤩","😊","🙂","😇",
+  "🤔","😏","😌","🥳","😋","🤗","😜","😝","🤑","🤭",
+  "😶","🙄","😬","😮","😲","😱","🤯","😢","😭","😤",
+  "🤬","🥺","😈","👻","💀","☠️","👽","🤖","💩","🎃",
+  "❤️","🧡","💛","💚","💙","💜","🖤","🤍","💔","❣️",
+  "💕","💗","💖","💘","💝","💞","👍","👎","👏","🙌",
+  "🤝","🙏","💪","✌️","🤞","🤟","🤘","👌","🤙","👋",
+  "✍️","🤳","💅","🖖","👆","👇","👈","👉","☝️","🖕",
+  "🔥","✨","🌟","💫","⭐","🌈","☀️","🌙","⚡","💥",
+  "🎉","🎊","🎈","🎁","🎂","🍕","🍔","☕","🍷","🍺"
+];
+
 function byNewest(a, b) {
   return new Date(b.lastSeen || 0) - new Date(a.lastSeen || 0);
+}
+
+function formatLastSeen(date) {
+  if (!date) return "last seen recently";
+  const d = new Date(date);
+  const now = new Date();
+  const diff = now - d;
+  const mins = Math.floor(diff / 60000);
+  const hrs = Math.floor(diff / 3600000);
+  
+  if (mins < 1) return "last seen just now";
+  if (mins < 60) return `last seen ${mins}m ago`;
+  if (hrs < 24) {
+    return `last seen today at ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+  }
+  
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) {
+    return `last seen yesterday at ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+  }
+  return `last seen ${d.toLocaleDateString()} at ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+}
+
+function formatMsgTime(date) {
+  return new Date(date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function dateSeparator(dateStr) {
+  const d = new Date(dateStr);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return "TODAY";
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) return "YESTERDAY";
+  return d.toLocaleDateString(undefined, { day: "numeric", month: "long", year: "numeric" }).toUpperCase();
 }
 
 export default function ChatPage() {
@@ -15,6 +64,7 @@ export default function ChatPage() {
   const lastPeerIdRef = useRef(null);
   const typingTimerRef = useRef(null);
   const selectedUserRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   const [friends, setFriends] = useState([]);
   const [recentConversations, setRecentConversations] = useState([]);
@@ -24,9 +74,21 @@ export default function ChatPage() {
   const [searchResults, setSearchResults] = useState([]);
   const [draft, setDraft] = useState("");
   const [imageFile, setImageFile] = useState(null);
+  const [imagePreview, setImagePreview] = useState(null);
   const [typingLabel, setTypingLabel] = useState("");
   const [isBusy, setIsBusy] = useState({ friends: false, messages: false, send: false, profile: false });
   const [error, setError] = useState("");
+
+  // New feature states
+  const [showEmoji, setShowEmoji] = useState(false);
+  const [replyingTo, setReplyingTo] = useState(null);
+  const [contextMenu, setContextMenu] = useState(null);
+  const [showProfilePanel, setShowProfilePanel] = useState(false);
+  const [showContactInfo, setShowContactInfo] = useState(false);
+  const [msgSearch, setMsgSearch] = useState("");
+  const [showMsgSearch, setShowMsgSearch] = useState(false);
+  const [msgSearchResults, setMsgSearchResults] = useState([]);
+  const [lightboxImg, setLightboxImg] = useState(null);
 
   const peerMap = useMemo(() => {
     const fromFriends = friends.map((f) => [f._id, f]);
@@ -34,18 +96,29 @@ export default function ChatPage() {
     return new Map([...fromFriends, ...fromRecent]);
   }, [friends, recentConversations]);
 
+  // ── Image preview handling ──
+  useEffect(() => {
+    if (!imageFile) {
+      setImagePreview(null);
+      return;
+    }
+    const url = URL.createObjectURL(imageFile);
+    setImagePreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [imageFile]);
+
   useEffect(() => {
     loadFriendsAndRecents();
   }, []);
 
-  // Only bind socket listeners once per token
+  // ── Socket listeners ──
   useEffect(() => {
     if (!token) return;
 
     const socket = io(SOCKET_BASE_URL, { auth: { token } });
     socketRef.current = socket;
 
-    socket.on("connect_error", (err) => {
+    socket.on("connect_error", () => {
       setError("Socket authentication failed. Please log in again.");
     });
 
@@ -70,13 +143,36 @@ export default function ChatPage() {
     });
 
     socket.on("user_typing", ({ userId, username, isTyping }) => {
-      if (selectedUser?._id === userId) {
+      if (selectedUserRef.current?._id === userId) {
         setTypingLabel(isTyping ? `${username} is typing...` : "");
       }
     });
 
+    socket.on("messages_read", ({ readerId }) => {
+      if (selectedUserRef.current?._id === readerId) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            (typeof m.senderId === "string" ? m.senderId : m.senderId?._id) === user._id
+              ? { ...m, read: true, delivered: true }
+              : m
+          )
+        );
+      }
+    });
+
+    socket.on("message_deleted", ({ messageId, forEveryone }) => {
+      if (forEveryone) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m._id === messageId
+              ? { ...m, deletedForEveryone: true, messageContent: "", imageUrl: "" }
+              : m
+          )
+        );
+      }
+    });
+
     return () => {
-      // Leave any joined room on disconnect
       if (lastPeerIdRef.current && socketRef.current) {
         socketRef.current.emit("leave_conversation", { userId: lastPeerIdRef.current });
       }
@@ -86,6 +182,7 @@ export default function ChatPage() {
     // eslint-disable-next-line
   }, [token]);
 
+  // ── Search users ──
   useEffect(() => {
     if (!searchQuery.trim()) {
       setSearchResults([]);
@@ -103,6 +200,42 @@ export default function ChatPage() {
 
     return () => clearTimeout(timer);
   }, [searchQuery]);
+
+  // ── Search messages in conversation ──
+  useEffect(() => {
+    if (!msgSearch.trim() || !selectedUser) {
+      setMsgSearchResults([]);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const { data } = await api.searchMessages(selectedUser._id, msgSearch);
+        setMsgSearchResults(data);
+      } catch {
+        setMsgSearchResults([]);
+      }
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [msgSearch, selectedUser]);
+
+  // ── Close context menu on click outside ──
+  useEffect(() => {
+    const handler = () => setContextMenu(null);
+    window.addEventListener("click", handler);
+    return () => window.removeEventListener("click", handler);
+  }, []);
+
+  // ── Close emoji on click outside ──
+  useEffect(() => {
+    if (!showEmoji) return;
+    const handler = (e) => {
+      if (!e.target.closest(".emoji-panel") && !e.target.closest(".composer-emoji-btn")) {
+        setShowEmoji(false);
+      }
+    };
+    window.addEventListener("click", handler);
+    return () => window.removeEventListener("click", handler);
+  }, [showEmoji]);
 
   const updateUserPresence = (userId, online, lastSeen) => {
     setFriends((prev) =>
@@ -141,13 +274,16 @@ export default function ChatPage() {
   };
 
   const openConversation = async (peer) => {
-    // Leave previous room if any
     if (lastPeerIdRef.current && socketRef.current) {
       socketRef.current.emit("leave_conversation", { userId: lastPeerIdRef.current });
     }
     setSelectedUser(peer);
     selectedUserRef.current = peer;
     setTypingLabel("");
+    setReplyingTo(null);
+    setShowMsgSearch(false);
+    setMsgSearch("");
+    setShowContactInfo(false);
     setIsBusy((prev) => ({ ...prev, messages: true }));
 
     try {
@@ -157,6 +293,7 @@ export default function ChatPage() {
 
       if (socketRef.current) {
         socketRef.current.emit("join_conversation", { userId: peer._id });
+        socketRef.current.emit("mark_read", { senderId: peer._id });
         lastPeerIdRef.current = peer._id;
       }
     } catch (err) {
@@ -173,7 +310,6 @@ export default function ChatPage() {
     const trimmed = draft.trim();
     if (!trimmed && !imageFile) return;
 
-    // Create optimistic message for instant display
     const tempId = `temp_${Date.now()}`;
     const optimisticMsg = {
       _id: tempId,
@@ -183,37 +319,43 @@ export default function ChatPage() {
       messageContent: trimmed,
       imageUrl: imageFile ? URL.createObjectURL(imageFile) : undefined,
       createdAt: new Date().toISOString(),
+      delivered: false,
+      read: false,
+      replyTo: replyingTo,
       _optimistic: true,
     };
 
-    // Show message instantly & clear input
     setMessages((prev) => [...prev, optimisticMsg]);
     setDraft("");
     const sentImage = imageFile;
     setImageFile(null);
+    setReplyingTo(null);
+    setShowEmoji(false);
 
-    // Build form data and send in background
     const formData = new FormData();
     formData.append("receiverId", selectedUser._id);
 
     if (sentImage) {
       formData.append("messageType", "image");
       formData.append("messageImage", sentImage);
+      if (trimmed) formData.append("messageContent", trimmed);
     } else {
       formData.append("messageType", "text");
       formData.append("messageContent", trimmed);
     }
 
+    if (replyingTo) {
+      formData.append("replyTo", replyingTo._id);
+    }
+
     try {
       const { data } = await api.sendMessage(formData);
-      // Remove the temp message and any socket-delivered duplicate, then add the confirmed one
       setMessages((prev) => {
         const cleaned = prev.filter((m) => m._id !== tempId && m._id !== data._id);
         return [...cleaned, data];
       });
       refreshRecents();
     } catch (err) {
-      // Remove the optimistic message on failure
       setMessages((prev) => prev.filter((m) => m._id !== tempId));
       setError(err?.response?.data?.message || "Message could not be sent.");
     }
@@ -262,6 +404,50 @@ export default function ChatPage() {
     }
   };
 
+  const deleteMessage = async (msg, forEveryone = false) => {
+    try {
+      await api.deleteMessage(msg._id, forEveryone);
+      if (forEveryone) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m._id === msg._id ? { ...m, deletedForEveryone: true, messageContent: "", imageUrl: "" } : m
+          )
+        );
+      } else {
+        setMessages((prev) => prev.filter((m) => m._id !== msg._id));
+      }
+    } catch (err) {
+      setError("Could not delete message.");
+    }
+    setContextMenu(null);
+  };
+
+  const toggleStarMessage = async (msg) => {
+    try {
+      const { data } = await api.toggleStar(msg._id);
+      setMessages((prev) =>
+        prev.map((m) => {
+          if (m._id !== msg._id) return m;
+          const starredBy = m.starredBy || [];
+          return {
+            ...m,
+            starredBy: data.starred
+              ? [...starredBy, user._id]
+              : starredBy.filter((id) => id !== user._id),
+          };
+        })
+      );
+    } catch {
+      setError("Could not star message.");
+    }
+    setContextMenu(null);
+  };
+
+  const copyMessage = (msg) => {
+    navigator.clipboard.writeText(msg.messageContent || "");
+    setContextMenu(null);
+  };
+
   const contacts = useMemo(() => {
     const merged = [...friends];
     recentConversations.forEach((item) => {
@@ -272,30 +458,73 @@ export default function ChatPage() {
     return merged.sort(byNewest);
   }, [friends, recentConversations]);
 
+  const getLastMessage = useCallback(
+    (contactId) => {
+      const conv = recentConversations.find((c) => c.user._id === contactId);
+      if (!conv) return null;
+      return conv.lastMessage;
+    },
+    [recentConversations]
+  );
+
+  const getUnreadCount = useCallback(
+    (contactId) => {
+      const conv = recentConversations.find((c) => c.user._id === contactId);
+      return conv?.unreadCount || 0;
+    },
+    [recentConversations]
+  );
+
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // Error auto-dismiss
+  useEffect(() => {
+    if (!error) return;
+    const t = setTimeout(() => setError(""), 4000);
+    return () => clearTimeout(t);
+  }, [error]);
+
+  // Group messages by date for date separators
+  const groupedMessages = useMemo(() => {
+    const groups = [];
+    let lastDate = "";
+    messages.forEach((msg) => {
+      const dateKey = dateSeparator(msg.timestamp || msg.createdAt);
+      if (dateKey !== lastDate) {
+        groups.push({ type: "date", label: dateKey, key: `date_${dateKey}_${msg._id}` });
+        lastDate = dateKey;
+      }
+      groups.push({ type: "msg", data: msg, key: msg._id });
+    });
+    return groups;
+  }, [messages]);
+
+  const selectedPeer = peerMap.get(selectedUser?._id);
+
+  // ── Profile picture helper ──
+  const avatarUrl = (u, size = 40) =>
+    u?.profilePicture
+      ? `${SOCKET_BASE_URL}${u.profilePicture}`
+      : `https://placehold.co/${size}x${size}/202c33/aebac1?text=${(u?.username?.[0] || "?").toUpperCase()}`;
+
   return (
     <div className="chat-shell">
       {/* ── Sidebar ──────────────────────────── */}
-      <aside className="sidebar">
+      <aside className={`sidebar ${showProfilePanel ? "sidebar-hidden" : ""}`}>
         <div className="sidebar-header">
           <div className="sidebar-header-left">
-            <label className="sidebar-avatar" title="Update profile photo">
-              <img
-                src={user?.profilePicture ? `${SOCKET_BASE_URL}${user.profilePicture}` : "https://placehold.co/40x40/202c33/aebac1?text=" + (user?.username?.[0]?.toUpperCase() || "U")}
-                alt="profile"
-              />
-              <input type="file" accept="image/*" onChange={updateProfile} hidden />
+            <label className="sidebar-avatar" title="Update profile photo" onClick={(e) => { e.preventDefault(); setShowProfilePanel(true); }}>
+              <img src={avatarUrl(user)} alt="profile" />
             </label>
             <span className="sidebar-username">{user?.username}</span>
           </div>
           <div className="sidebar-header-actions">
             <button className="icon-btn" onClick={logout} type="button" title="Logout">
-              ⏻
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M16 13v-2H7V8l-5 4 5 4v-3z"/><path d="M20 3h-9c-1.103 0-2 .897-2 2v4h2V5h9v14h-9v-4H9v4c0 1.103.897 2 2 2h9c1.103 0 2-.897 2-2V5c0-1.103-.897-2-2-2z"/></svg>
             </button>
           </div>
         </div>
@@ -312,7 +541,10 @@ export default function ChatPage() {
           <ul className="search-results-dropdown">
             {searchResults.map((item) => (
               <li key={item._id}>
-                <span>{item.username}</span>
+                <div className="search-result-user">
+                  <img src={avatarUrl(item, 32)} alt="" className="search-result-avatar" />
+                  <span>{item.username}</span>
+                </div>
                 <button onClick={() => addFriend(item.username)} type="button">
                   Add
                 </button>
@@ -327,55 +559,151 @@ export default function ChatPage() {
             <p className="no-contacts">No chats yet. Search for a user above to start a conversation.</p>
           )}
 
-          {contacts.map((contact) => (
-            <div
-              key={contact._id}
-              className={`contact-item ${selectedUser?._id === contact._id ? "active" : ""}`}
-              onClick={() => openConversation(contact)}
-            >
-              <div className="contact-avatar">
-                <img
-                  src={contact.profilePicture ? `${SOCKET_BASE_URL}${contact.profilePicture}` : "https://placehold.co/49x49/202c33/aebac1?text=" + (contact.username?.[0]?.toUpperCase() || "?")}
-                  alt={contact.username}
-                />
-                {contact.online && <span className="online-badge" />}
+          {contacts.map((contact) => {
+            const lastMsg = getLastMessage(contact._id);
+            const unread = getUnreadCount(contact._id);
+            const lastMsgPreview = lastMsg
+              ? lastMsg.deletedForEveryone
+                ? "🚫 This message was deleted"
+                : lastMsg.messageType === "image"
+                ? "📷 Photo"
+                : (lastMsg.messageContent || "").slice(0, 40)
+              : "";
+
+            return (
+              <div
+                key={contact._id}
+                className={`contact-item ${selectedUser?._id === contact._id ? "active" : ""}`}
+                onClick={() => openConversation(contact)}
+              >
+                <div className="contact-avatar">
+                  <img src={avatarUrl(contact, 49)} alt={contact.username} />
+                  {contact.online && <span className="online-badge" />}
+                </div>
+                <div className="contact-info">
+                  <div className="contact-info-top">
+                    <span className="contact-name">{contact.username}</span>
+                    {lastMsg && (
+                      <span className="contact-time">
+                        {formatMsgTime(lastMsg.timestamp || lastMsg.createdAt)}
+                      </span>
+                    )}
+                  </div>
+                  <div className="contact-info-bottom">
+                    <span className="contact-last-msg">
+                      {lastMsgPreview || (contact.online ? "online" : formatLastSeen(contact.lastSeen))}
+                    </span>
+                    {unread > 0 && <span className="unread-badge">{unread}</span>}
+                  </div>
+                </div>
               </div>
-              <div className="contact-info">
-                <span className="contact-name">{contact.username}</span>
-                <span className="contact-last-seen">
-                  {contact.online ? "online" : "last seen recently"}
-                </span>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </aside>
+
+      {/* ── Profile Panel (replaces sidebar) ── */}
+      {showProfilePanel && (
+        <aside className="sidebar profile-panel-sidebar">
+          <div className="profile-panel-header">
+            <button className="icon-btn" onClick={() => setShowProfilePanel(false)}>
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+            </button>
+            <span>Profile</span>
+          </div>
+          <div className="profile-panel-body">
+            <label className="profile-panel-avatar">
+              <img src={avatarUrl(user, 200)} alt="profile" />
+              <div className="profile-panel-avatar-overlay">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+                <span>Change photo</span>
+              </div>
+              <input type="file" accept="image/*" onChange={updateProfile} hidden />
+            </label>
+            <div className="profile-panel-field">
+              <label>Your name</label>
+              <p>{user?.username}</p>
+            </div>
+            <div className="profile-panel-field">
+              <label>About</label>
+              <p>{user?.about || "Hey there! I am using WhatsApp"}</p>
+            </div>
+            <div className="profile-panel-field">
+              <label>Email</label>
+              <p>{user?.email}</p>
+            </div>
+          </div>
+        </aside>
+      )}
 
       {/* ── Conversation ─────────────────────── */}
       <main className="conversation">
         {!selectedUser && (
           <div className="empty-state">
+            <div className="empty-state-icon-wrap">
+              <svg viewBox="0 0 303 172" width="250" fill="none"><path d="M229.565 160.229c32.647-16.593 55.043-51.632 55.043-91.871 0-57.033-50.071-86.3-107.107-67.067C124.035-18.027 41.445-4.813 12.487 50.569-5.244 85.456 5.49 126.969 31.614 150.162" stroke="#00a884" strokeWidth="1.5" opacity=".35"/><circle cx="152" cy="86" r="65" stroke="#00a884" strokeWidth="1.5" opacity=".2"/><path d="M152 54c-17.673 0-32 14.327-32 32 0 6.016 1.66 11.64 4.547 16.453L121 118l16.12-4.227A31.824 31.824 0 00152 118c17.673 0 32-14.327 32-32s-14.327-32-32-32z" fill="#00a884" opacity=".15"/><path d="M152 54c-17.673 0-32 14.327-32 32 0 6.016 1.66 11.64 4.547 16.453L121 118l16.12-4.227A31.824 31.824 0 00152 118c17.673 0 32-14.327 32-32s-14.327-32-32-32z" stroke="#00a884" strokeWidth="1.5"/></svg>
+            </div>
             <h2>WhatsApp Web</h2>
-            <p>Send and receive messages. Now with real-time delivery powered by Socket.IO.</p>
+            <p>Send and receive messages without keeping your phone online.<br/>Use WhatsApp on up to 4 linked devices and 1 phone at the same time.</p>
+            <div className="empty-state-encryption">
+              <svg viewBox="0 0 10 12" width="10" height="12" fill="#8696a0"><path d="M5 0C3.346 0 2 1.346 2 3v1.5H1a1 1 0 00-1 1v5a1 1 0 001 1h8a1 1 0 001-1v-5a1 1 0 00-1-1H8V3c0-1.654-1.346-3-3-3zm0 1c1.103 0 2 .897 2 2v1.5H3V3c0-1.103.897-2 2-2z"/></svg>
+              <span>End-to-end encrypted</span>
+            </div>
           </div>
         )}
 
         {selectedUser && (
           <>
             <header className="chat-header">
-              <div className="chat-header-avatar">
-                <img
-                  src={selectedUser.profilePicture ? `${SOCKET_BASE_URL}${selectedUser.profilePicture}` : "https://placehold.co/40x40/202c33/aebac1?text=" + (selectedUser.username?.[0]?.toUpperCase() || "?")}
-                  alt={selectedUser.username}
-                />
+              <div className="chat-header-left" onClick={() => setShowContactInfo(!showContactInfo)}>
+                <div className="chat-header-avatar">
+                  <img src={avatarUrl(selectedUser)} alt={selectedUser.username} />
+                </div>
+                <div className="chat-header-info">
+                  <h2>{selectedUser.username}</h2>
+                  <p className={typingLabel ? "typing-text" : ""}>
+                    {typingLabel ||
+                      (selectedPeer?.online || peerMap.get(selectedUser._id)?.online
+                        ? "online"
+                        : formatLastSeen(selectedPeer?.lastSeen || peerMap.get(selectedUser._id)?.lastSeen))}
+                  </p>
+                </div>
               </div>
-              <div className="chat-header-info">
-                <h2>{selectedUser.username}</h2>
-                <p className={typingLabel ? "typing-text" : ""}>
-                  {typingLabel || (peerMap.get(selectedUser._id)?.online ? "online" : "offline")}
-                </p>
+              <div className="chat-header-actions">
+                <button className="icon-btn" onClick={() => { setShowMsgSearch(!showMsgSearch); setMsgSearch(""); }} title="Search">
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M15.009 13.805h-.636l-.22-.219a5.184 5.184 0 001.257-3.386 5.207 5.207 0 10-5.207 5.208 5.183 5.183 0 003.385-1.258l.22.22v.635l4.004 3.999 1.194-1.195-3.997-4.004zm-4.806 0a3.6 3.6 0 110-7.202 3.6 3.6 0 010 7.202z"/></svg>
+                </button>
               </div>
             </header>
+
+            {showMsgSearch && (
+              <div className="msg-search-bar">
+                <input
+                  value={msgSearch}
+                  onChange={(e) => setMsgSearch(e.target.value)}
+                  placeholder="Search messages..."
+                  autoFocus
+                />
+                <button className="icon-btn" onClick={() => { setShowMsgSearch(false); setMsgSearch(""); }}>✕</button>
+                {msgSearchResults.length > 0 && (
+                  <div className="msg-search-results">
+                    {msgSearchResults.map((m) => (
+                      <div key={m._id} className="msg-search-result-item" onClick={() => {
+                        const el = document.getElementById(`msg-${m._id}`);
+                        el?.scrollIntoView({ behavior: "smooth", block: "center" });
+                        el?.classList.add("highlight-msg");
+                        setTimeout(() => el?.classList.remove("highlight-msg"), 2000);
+                        setShowMsgSearch(false);
+                      }}>
+                        <span className="msg-search-sender">{m.senderId?.username}</span>
+                        <span className="msg-search-text">{m.messageContent?.slice(0, 60)}</span>
+                        <span className="msg-search-time">{formatMsgTime(m.timestamp || m.createdAt)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             <section className="message-list">
               {isBusy.messages && (
@@ -387,31 +715,135 @@ export default function ChatPage() {
                 </div>
               )}
 
-              {messages.map((message) => {
+              {groupedMessages.map((item) => {
+                if (item.type === "date") {
+                  return (
+                    <div key={item.key} className="date-separator">
+                      <span>{item.label}</span>
+                    </div>
+                  );
+                }
+
+                const message = item.data;
                 const mine =
                   (typeof message.senderId === "string" ? message.senderId : message.senderId?._id) === user._id;
 
-                const text = message.messageType === "text" ? message.messageContent : "";
+                if (message.deletedForEveryone) {
+                  return (
+                    <article key={message._id} id={`msg-${message._id}`} className={`bubble ${mine ? "mine" : "theirs"} deleted-bubble`}>
+                      <p className="deleted-msg">🚫 This message was deleted</p>
+                      <small>{formatMsgTime(message.timestamp || message.createdAt)}</small>
+                    </article>
+                  );
+                }
+
+                const text = message.messageContent || "";
                 const image = message.messageType === "image" ? message.imageUrl : "";
-                const imageSrc = message._optimistic ? image : `${SOCKET_BASE_URL}${image}`;
+                const imageSrc = message._optimistic ? image : image ? `${SOCKET_BASE_URL}${image}` : "";
+                const isStarred = (message.starredBy || []).includes(user._id);
 
                 return (
-                  <article key={message._id} className={`bubble ${mine ? "mine" : "theirs"}`}>
-                    {!!text && <p>{text}</p>}
-                    {!!image && (
-                      <img src={imageSrc} alt="attachment" className="message-image" />
+                  <article
+                    key={message._id}
+                    id={`msg-${message._id}`}
+                    className={`bubble ${mine ? "mine" : "theirs"}`}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setContextMenu({
+                        msg: message,
+                        mine,
+                        x: e.clientX,
+                        y: e.clientY,
+                      });
+                    }}
+                  >
+                    {/* Reply reference */}
+                    {message.replyTo && (
+                      <div className="reply-ref" onClick={() => {
+                        const el = document.getElementById(`msg-${message.replyTo._id}`);
+                        el?.scrollIntoView({ behavior: "smooth", block: "center" });
+                        el?.classList.add("highlight-msg");
+                        setTimeout(() => el?.classList.remove("highlight-msg"), 2000);
+                      }}>
+                        <span className="reply-ref-sender">{message.replyTo.senderId?.username || "Unknown"}</span>
+                        <span className="reply-ref-text">
+                          {message.replyTo.messageType === "image" ? "📷 Photo" : (message.replyTo.messageContent || "").slice(0, 60)}
+                        </span>
+                      </div>
                     )}
-                    <small>{new Date(message.timestamp || message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small>
+
+                    {!!image && (
+                      <img
+                        src={imageSrc}
+                        alt="attachment"
+                        className="message-image"
+                        onClick={() => setLightboxImg(imageSrc)}
+                      />
+                    )}
+                    {!!text && <p>{text}</p>}
+                    <small>
+                      {isStarred && <span className="star-icon">⭐</span>}
+                      {formatMsgTime(message.timestamp || message.createdAt)}
+                      {mine && (
+                        <span className={`msg-status ${message.read ? "read" : message.delivered ? "delivered" : "sent"}`}>
+                          {message.read ? "✓✓" : message.delivered ? "✓✓" : "✓"}
+                        </span>
+                      )}
+                    </small>
                   </article>
                 );
               })}
               <div ref={messagesEndRef} />
             </section>
 
+            {/* Reply bar */}
+            {replyingTo && (
+              <div className="reply-bar">
+                <div className="reply-bar-content">
+                  <span className="reply-bar-sender">
+                    {(typeof replyingTo.senderId === "string" ? replyingTo.senderId : replyingTo.senderId?.username) || "You"}
+                  </span>
+                  <span className="reply-bar-text">
+                    {replyingTo.messageType === "image" ? "📷 Photo" : (replyingTo.messageContent || "").slice(0, 80)}
+                  </span>
+                </div>
+                <button className="reply-bar-close" onClick={() => setReplyingTo(null)}>✕</button>
+              </div>
+            )}
+
+            {/* Image preview strip */}
+            {imagePreview && (
+              <div className="image-preview-strip">
+                <img src={imagePreview} alt="preview" />
+                <button className="image-preview-close" onClick={() => setImageFile(null)}>✕</button>
+              </div>
+            )}
+
+            {/* Emoji picker */}
+            {showEmoji && (
+              <div className="emoji-panel">
+                {EMOJIS.map((e, i) => (
+                  <button key={i} className="emoji-btn" onClick={() => setDraft((prev) => prev + e)} type="button">
+                    {e}
+                  </button>
+                ))}
+              </div>
+            )}
+
             <form className="composer" onSubmit={onSendMessage}>
-              <label className={`composer-attach ${imageFile ? "has-file" : ""}`} title="Attach image">
-                📎
+              <button
+                className="icon-btn composer-emoji-btn"
+                type="button"
+                title="Emoji"
+                onClick={() => setShowEmoji(!showEmoji)}
+              >
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M9.153 11.603c.795 0 1.439-.879 1.439-1.962s-.644-1.962-1.439-1.962-1.439.879-1.439 1.962.644 1.962 1.439 1.962zm5.694 0c.795 0 1.439-.879 1.439-1.962s-.644-1.962-1.439-1.962-1.439.879-1.439 1.962.644 1.962 1.439 1.962zM11.984 2C6.486 2 2.017 6.48 2.017 11.979c0 5.498 4.469 9.978 9.967 9.978 5.497 0 9.966-4.48 9.966-9.978C21.95 6.48 17.481 2 11.984 2zm0 17.956c-4.398 0-7.967-3.57-7.967-7.978S7.586 4 11.984 4s7.966 3.57 7.966 7.978-3.569 7.978-7.966 7.978zm0-3.26c-2.146 0-4.142-1.246-5.053-3.18l1.789-.777c.57 1.214 1.847 2.048 3.264 2.048 1.418 0 2.696-.834 3.265-2.048l1.789.777c-.91 1.934-2.907 3.18-5.054 3.18z"/></svg>
+              </button>
+              <label className={`icon-btn composer-attach ${imageFile ? "has-file" : ""}`} title="Attach image">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M1.816 15.556v.002c0 1.502.584 2.912 1.646 3.972s2.472 1.647 3.974 1.647c1.501 0 2.912-.584 3.972-1.646l9.547-9.548c.769-.768 1.147-1.767 1.058-2.817-.079-.968-.548-1.927-1.319-2.698-1.594-1.592-4.068-1.711-5.517-.262l-7.916 7.915c-.881.881-.792 2.25.214 3.261.959.958 2.423 1.053 3.263.215l5.511-5.512c.28-.28.267-.722.053-.936l-.244-.244c-.191-.191-.567-.349-.957.04l-5.506 5.506c-.18.18-.635.127-.976-.214-.098-.097-.576-.613-.213-.973l7.915-7.917c.818-.817 2.267-.699 3.23.262.5.501.802 1.1.849 1.685.051.573-.156 1.111-.589 1.543l-9.547 9.549a3.97 3.97 0 01-2.829 1.171 3.975 3.975 0 01-2.83-1.171 3.973 3.973 0 01-1.17-2.828c0-1.071.416-2.073 1.17-2.829l7.209-7.211c.191-.191.191-.567-.055-.812l-.243-.243c-.191-.191-.587-.349-.958.04L3.461 12.71c-1.062 1.062-1.645 2.472-1.645 3.974v-.128z"/></svg>
                 <input
+                  ref={fileInputRef}
                   type="file"
                   accept="image/*"
                   hidden
@@ -425,13 +857,73 @@ export default function ChatPage() {
                   placeholder="Type a message"
                 />
               </div>
-              <button className="composer-send" type="submit" title="Send">
-                ➤
+              <button className="icon-btn composer-send" type="submit" title="Send">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M1.101 21.757L23.8 12.028 1.101 2.3l.011 7.912 13.623 1.816-13.623 1.817-.011 7.912z"/></svg>
               </button>
             </form>
           </>
         )}
       </main>
+
+      {/* ── Contact Info Panel ── */}
+      {showContactInfo && selectedUser && (
+        <aside className="contact-info-panel">
+          <div className="contact-info-panel-header">
+            <button className="icon-btn" onClick={() => setShowContactInfo(false)}>✕</button>
+            <span>Contact info</span>
+          </div>
+          <div className="contact-info-panel-body">
+            <div className="contact-info-avatar">
+              <img src={avatarUrl(selectedUser, 200)} alt={selectedUser.username} />
+            </div>
+            <h3>{selectedUser.username}</h3>
+            <p className="contact-info-status">
+              {selectedPeer?.online || peerMap.get(selectedUser._id)?.online
+                ? "online"
+                : formatLastSeen(selectedPeer?.lastSeen || peerMap.get(selectedUser._id)?.lastSeen)}
+            </p>
+            <div className="contact-info-section">
+              <label>About</label>
+              <p>{selectedUser.about || peerMap.get(selectedUser._id)?.about || "Hey there! I am using WhatsApp"}</p>
+            </div>
+          </div>
+        </aside>
+      )}
+
+      {/* ── Context Menu ── */}
+      {contextMenu && (
+        <div
+          className="context-menu"
+          style={{ top: contextMenu.y, left: contextMenu.x }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button onClick={() => { setReplyingTo(contextMenu.msg); setContextMenu(null); }}>
+            ↩ Reply
+          </button>
+          <button onClick={() => copyMessage(contextMenu.msg)}>
+            📋 Copy
+          </button>
+          <button onClick={() => toggleStarMessage(contextMenu.msg)}>
+            {(contextMenu.msg.starredBy || []).includes(user._id) ? "★ Unstar" : "☆ Star"}
+          </button>
+          {contextMenu.mine && (
+            <button onClick={() => deleteMessage(contextMenu.msg, true)} className="context-danger">
+              🗑 Delete for everyone
+            </button>
+          )}
+          <button onClick={() => deleteMessage(contextMenu.msg, false)} className="context-danger">
+            🗑 Delete for me
+          </button>
+        </div>
+      )}
+
+      {/* ── Image Lightbox ── */}
+      {lightboxImg && (
+        <div className="lightbox" onClick={() => setLightboxImg(null)}>
+          <button className="lightbox-close" onClick={() => setLightboxImg(null)}>✕</button>
+          <img src={lightboxImg} alt="fullscreen" />
+        </div>
+      )}
 
       {error && <div className="toast">{error}</div>}
     </div>
