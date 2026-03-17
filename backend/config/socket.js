@@ -1,4 +1,6 @@
 const chatHandler = require('../sockets/chatHandler');
+const groupChatHandler = require('../sockets/groupChatHandler');
+const callHandler = require('../sockets/callHandler');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 
@@ -40,6 +42,8 @@ module.exports = (io) => {
 
     // Initialize chat handler
     chatHandler(io, socket);
+    groupChatHandler(io, socket);
+    callHandler(io, socket);
 
     socket.on('disconnect', async () => {
       console.log(`User disconnected: ${socket.user.username}`);

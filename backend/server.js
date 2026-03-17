@@ -15,6 +15,7 @@ const authRoutes = require('./routes/authRoutes');
 const userRoutes = require('./routes/userRoutes');
 const messageRoutes = require('./routes/messageRoutes');
 const friendRoutes = require('./routes/friendRoutes');
+const groupRoutes = require('./routes/groupRoutes');
 
 // Initialize app
 const app = express();
@@ -49,6 +50,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/messages', messageRoutes);
 app.use('/api/friends', friendRoutes);
+app.use('/api/groups', groupRoutes);
 
 // Socket.io configuration
 socketConfig(io);

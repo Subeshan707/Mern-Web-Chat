@@ -2,6 +2,11 @@ import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { io } from "socket.io-client";
 import { api } from "../api/chatApi";
 import { useAuth } from "../context/AuthContext";
+import CallOverlay from "../components/CallOverlay";
+import GroupCallOverlay from "../components/GroupCallOverlay";
+import CreateGroupDialog from "../components/CreateGroupDialog";
+import GroupInfoPanel from "../components/GroupInfoPanel";
+import { useWebRTC } from "../hooks/useWebRTC";
 
 const SOCKET_BASE_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:5000";
 
@@ -65,6 +70,9 @@ export default function ChatPage() {
   const typingTimerRef = useRef(null);
   const selectedUserRef = useRef(null);
   const fileInputRef = useRef(null);
+  const selectedGroupRef = useRef(null);
+  const groupCallLocalStreamRef = useRef(null);
+  const groupCallGroupIdRef = useRef(null);
 
   const [friends, setFriends] = useState([]);
   const [recentConversations, setRecentConversations] = useState([]);
@@ -89,6 +97,30 @@ export default function ChatPage() {
   const [showMsgSearch, setShowMsgSearch] = useState(false);
   const [msgSearchResults, setMsgSearchResults] = useState([]);
   const [lightboxImg, setLightboxImg] = useState(null);
+
+  // ── Group states ──
+  const [groups, setGroups] = useState([]);
+  const [selectedGroup, setSelectedGroup] = useState(null);
+  const [showCreateGroup, setShowCreateGroup] = useState(false);
+  const [showGroupInfo, setShowGroupInfo] = useState(false);
+
+  // ── Call states ──
+  const [callState, setCallState] = useState(null); // 'incoming'|'outgoing'|'connected'
+  const [callType, setCallType] = useState('audio');
+  const [callPeer, setCallPeer] = useState(null);
+  const [localStream, setLocalStream] = useState(null);
+  const [remoteStream, setRemoteStream] = useState(null);
+  const incomingOfferRef = useRef(null);
+
+  // ── Group call states ──
+  const [groupCallState, setGroupCallState] = useState(null);
+  const [groupCallType, setGroupCallType] = useState('audio');
+  const [groupCallGroupId, setGroupCallGroupId] = useState(null);
+  const [groupCallParticipants, setGroupCallParticipants] = useState([]);
+  const [groupCallLocalStream, setGroupCallLocalStream] = useState(null);
+  const groupCallPcsRef = useRef({});
+
+  const webrtc = useWebRTC(socketRef);
 
   const peerMap = useMemo(() => {
     const fromFriends = friends.map((f) => [f._id, f]);
@@ -170,6 +202,144 @@ export default function ChatPage() {
           )
         );
       }
+    });
+
+    // ── Group socket listeners ──
+    socket.on("connect", () => {
+      socket.emit("join_groups");
+    });
+
+    socket.on("receive_group_message", (message) => {
+      if (selectedGroupRef.current?._id === message.groupId) {
+        setMessages((prev) => {
+          if (prev.some((m) => m._id === message._id)) return prev;
+          return [...prev, message];
+        });
+      }
+      loadGroups();
+    });
+
+    socket.on("group_created", (group) => {
+      setGroups((prev) => {
+        if (prev.some((g) => g._id === group._id)) return prev;
+        return [group, ...prev];
+      });
+      socket.emit("join_group", { groupId: group._id });
+    });
+
+    socket.on("group_updated", (group) => {
+      setGroups((prev) => prev.map((g) => (g._id === group._id ? { ...group, lastMessage: g.lastMessage, unreadCount: g.unreadCount } : g)));
+      if (selectedGroupRef.current?._id === group._id) {
+        setSelectedGroup(group);
+      }
+    });
+
+    socket.on("group_removed", ({ groupId }) => {
+      setGroups((prev) => prev.filter((g) => g._id !== groupId));
+      if (selectedGroupRef.current?._id === groupId) {
+        setSelectedGroup(null);
+        setMessages([]);
+      }
+    });
+
+    socket.on("group_user_typing", ({ groupId, userId, username, isTyping }) => {
+      if (selectedGroupRef.current?._id === groupId && userId !== user._id) {
+        setTypingLabel(isTyping ? `${username} is typing...` : "");
+      }
+    });
+
+    // ── 1:1 Call listeners ──
+    socket.on("call_incoming", ({ callerId, callerName, callerPicture, callType: ct }) => {
+      setCallPeer({ _id: callerId, username: callerName, profilePicture: callerPicture });
+      setCallType(ct);
+      setCallState("incoming");
+    });
+
+    socket.on("call_accepted", () => {
+      setCallState("connected");
+    });
+
+    socket.on("call_rejected", () => {
+      webrtc.cleanup();
+      setCallState(null);
+      setCallPeer(null);
+      setLocalStream(null);
+      setRemoteStream(null);
+    });
+
+    socket.on("call_ended", () => {
+      webrtc.cleanup();
+      setCallState(null);
+      setCallPeer(null);
+      setLocalStream(null);
+      setRemoteStream(null);
+    });
+
+    socket.on("webrtc_offer", ({ fromId, offer }) => {
+      incomingOfferRef.current = offer;
+    });
+
+    socket.on("webrtc_answer", ({ answer }) => {
+      webrtc.handleAnswer(answer);
+    });
+
+    socket.on("webrtc_ice_candidate", ({ candidate }) => {
+      webrtc.handleIceCandidate(candidate);
+    });
+
+    // ── Group Call listeners ──
+    socket.on("group_call_incoming", ({ groupId, callerName, callType: ct }) => {
+      setGroupCallGroupId(groupId);
+      setGroupCallType(ct);
+      setGroupCallState("incoming");
+      setCallPeer({ username: callerName });
+    });
+
+    socket.on("group_call_user_joined", ({ userId, username, profilePicture }) => {
+      setGroupCallParticipants((prev) => {
+        if (prev.some((p) => p.userId === userId)) return prev;
+        return [...prev, { userId, username, profilePicture, stream: null }];
+      });
+    });
+
+    socket.on("group_call_user_left", ({ userId }) => {
+      setGroupCallParticipants((prev) => prev.filter((p) => p.userId !== userId));
+      if (groupCallPcsRef.current[userId]) {
+        groupCallPcsRef.current[userId].close();
+        delete groupCallPcsRef.current[userId];
+      }
+    });
+
+    socket.on("group_call_offer", async ({ fromId, offer }) => {
+      try {
+        const stream = groupCallLocalStreamRef.current;
+        if (!stream) return;
+        const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+        groupCallPcsRef.current[fromId] = pc;
+        stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+        pc.ontrack = (e) => {
+          const rs = new MediaStream();
+          rs.addTrack(e.track);
+          setGroupCallParticipants((prev) => prev.map((p) => p.userId === fromId ? { ...p, stream: rs } : p));
+        };
+        pc.onicecandidate = (e) => {
+          if (e.candidate) socket.emit("group_call_ice_candidate", { targetId: fromId, groupId: groupCallGroupIdRef.current, candidate: e.candidate });
+        };
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit("group_call_answer", { targetId: fromId, groupId: groupCallGroupIdRef.current, answer });
+      } catch (err) { console.error("group_call_offer handler error:", err); }
+    });
+
+    socket.on("group_call_answer", async ({ fromId, answer }) => {
+      const pc = groupCallPcsRef.current[fromId];
+      if (pc) await pc.setRemoteDescription(new RTCSessionDescription(answer));
+    });
+
+    socket.on("group_call_ice_candidate", async ({ fromId, candidate }) => {
+      const pc = groupCallPcsRef.current[fromId];
+      if (pc) try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch {}
     });
 
     return () => {
@@ -273,12 +443,195 @@ export default function ChatPage() {
     setRecentConversations(data || []);
   };
 
+  const loadGroups = async () => {
+    try {
+      const { data } = await api.getGroups();
+      setGroups(data || []);
+    } catch {}
+  };
+
+  // Load groups on mount
+  useEffect(() => { loadGroups(); }, []);
+
+  // Keep refs in sync
+  useEffect(() => { selectedGroupRef.current = selectedGroup; }, [selectedGroup]);
+  useEffect(() => { groupCallGroupIdRef.current = groupCallGroupId; }, [groupCallGroupId]);
+
+  const openGroupConversation = async (group) => {
+    setSelectedUser(null);
+    selectedUserRef.current = null;
+    setSelectedGroup(group);
+    setTypingLabel("");
+    setReplyingTo(null);
+    setShowMsgSearch(false);
+    setMsgSearch("");
+    setShowContactInfo(false);
+    setShowGroupInfo(false);
+    setIsBusy((prev) => ({ ...prev, messages: true }));
+
+    try {
+      const { data } = await api.getGroupMessages(group._id, 1, 50);
+      setMessages(data.messages || []);
+      if (socketRef.current) {
+        socketRef.current.emit("join_group", { groupId: group._id });
+      }
+    } catch (err) {
+      setError(err?.response?.data?.message || "Failed to load group messages.");
+    } finally {
+      setIsBusy((prev) => ({ ...prev, messages: false }));
+    }
+  };
+
+  const onCreateGroup = async ({ name, memberIds }) => {
+    try {
+      await api.createGroup({ name, memberIds });
+      setShowCreateGroup(false);
+      await loadGroups();
+    } catch (err) {
+      setError(err?.response?.data?.message || "Could not create group.");
+    }
+  };
+
+  const onRemoveGroupMember = async (memberId) => {
+    if (!selectedGroup) return;
+    try {
+      const { data } = await api.removeGroupMember(selectedGroup._id, memberId);
+      setSelectedGroup(data);
+      loadGroups();
+    } catch (err) {
+      setError("Could not remove member.");
+    }
+  };
+
+  const onLeaveGroup = async () => {
+    if (!selectedGroup) return;
+    try {
+      await api.removeGroupMember(selectedGroup._id, user._id);
+      setSelectedGroup(null);
+      setMessages([]);
+      setShowGroupInfo(false);
+      loadGroups();
+    } catch (err) {
+      setError("Could not leave group.");
+    }
+  };
+
+  // ── Call handlers ──
+  const initiateCall = async (peer, type) => {
+    setCallPeer(peer);
+    setCallType(type);
+    setCallState("outgoing");
+    try {
+      const stream = await webrtc.startCall(peer._id, type === "video", (rs) => setRemoteStream(rs));
+      setLocalStream(stream);
+      socketRef.current?.emit("call_initiate", {
+        calleeId: peer._id,
+        callType: type,
+        callerInfo: {},
+      });
+    } catch (err) {
+      console.error("Call initiate error:", err);
+      setCallState(null);
+      setError("Could not start call. Check microphone/camera permissions.");
+    }
+  };
+
+  const acceptCall = async () => {
+    try {
+      const offer = incomingOfferRef.current;
+      // Wait briefly for the offer to arrive if it hasn't yet
+      if (!offer) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      const finalOffer = incomingOfferRef.current;
+      if (!finalOffer) {
+        setError("Call failed – no offer received.");
+        setCallState(null);
+        return;
+      }
+      const stream = await webrtc.answerCall(callPeer._id, finalOffer, callType === "video", (rs) => setRemoteStream(rs));
+      setLocalStream(stream);
+      socketRef.current?.emit("call_accept", { callerId: callPeer._id });
+      setCallState("connected");
+      incomingOfferRef.current = null;
+    } catch (err) {
+      console.error("Accept call error:", err);
+      setError("Could not accept call.");
+      setCallState(null);
+    }
+  };
+
+  const rejectCall = () => {
+    socketRef.current?.emit("call_reject", { callerId: callPeer._id });
+    setCallState(null);
+    setCallPeer(null);
+    incomingOfferRef.current = null;
+  };
+
+  const endCall = () => {
+    if (callPeer) socketRef.current?.emit("call_end", { peerId: callPeer._id });
+    webrtc.cleanup();
+    setCallState(null);
+    setCallPeer(null);
+    setLocalStream(null);
+    setRemoteStream(null);
+  };
+
+  // ── Group Call handlers ──
+  const initiateGroupCall = async (group, type) => {
+    setGroupCallGroupId(group._id);
+    setGroupCallType(type);
+    setGroupCallState("outgoing");
+    try {
+      const stream = await webrtc.getLocalStream(type === "video");
+      groupCallLocalStreamRef.current = stream;
+      setGroupCallLocalStream(stream);
+      const memberIds = group.members.map((m) => (typeof m === "string" ? m : m._id));
+      socketRef.current?.emit("group_call_initiate", { groupId: group._id, callType: type, memberIds });
+      setGroupCallState("connected");
+    } catch (err) {
+      setGroupCallState(null);
+      setError("Could not start group call.");
+    }
+  };
+
+  const acceptGroupCall = async () => {
+    try {
+      const stream = await webrtc.getLocalStream(groupCallType === "video");
+      groupCallLocalStreamRef.current = stream;
+      setGroupCallLocalStream(stream);
+      socketRef.current?.emit("group_call_join", { groupId: groupCallGroupId });
+      setGroupCallState("connected");
+    } catch (err) {
+      setGroupCallState(null);
+      setError("Could not join group call.");
+    }
+  };
+
+  const rejectGroupCall = () => {
+    setGroupCallState(null);
+    setGroupCallGroupId(null);
+  };
+
+  const endGroupCall = () => {
+    socketRef.current?.emit("group_call_leave", { groupId: groupCallGroupId });
+    groupCallLocalStreamRef.current?.getTracks().forEach((t) => t.stop());
+    Object.values(groupCallPcsRef.current).forEach((pc) => pc.close());
+    groupCallPcsRef.current = {};
+    setGroupCallState(null);
+    setGroupCallGroupId(null);
+    setGroupCallParticipants([]);
+    setGroupCallLocalStream(null);
+  };
+
   const openConversation = async (peer) => {
     if (lastPeerIdRef.current && socketRef.current) {
       socketRef.current.emit("leave_conversation", { userId: lastPeerIdRef.current });
     }
     setSelectedUser(peer);
     selectedUserRef.current = peer;
+    setSelectedGroup(null);
+    setShowGroupInfo(false);
     setTypingLabel("");
     setReplyingTo(null);
     setShowMsgSearch(false);
@@ -305,11 +658,37 @@ export default function ChatPage() {
 
   const onSendMessage = async (event) => {
     event.preventDefault();
-    if (!selectedUser) return;
+    if (!selectedUser && !selectedGroup) return;
 
     const trimmed = draft.trim();
     if (!trimmed && !imageFile) return;
 
+    // ── Group message via socket ──
+    if (selectedGroup) {
+      const tempId = `temp_${Date.now()}`;
+      const optimisticMsg = {
+        _id: tempId,
+        senderId: { _id: user._id, username: user.username, profilePicture: user.profilePicture },
+        groupId: selectedGroup._id,
+        messageType: "text",
+        messageContent: trimmed,
+        createdAt: new Date().toISOString(),
+        _optimistic: true,
+      };
+      setMessages((prev) => [...prev, optimisticMsg]);
+      setDraft("");
+      setReplyingTo(null);
+      setShowEmoji(false);
+      socketRef.current?.emit("send_group_message", {
+        groupId: selectedGroup._id,
+        messageType: "text",
+        messageContent: trimmed,
+        replyTo: replyingTo?._id || null,
+      });
+      return;
+    }
+
+    // ── DM message (existing logic) ──
     const tempId = `temp_${Date.now()}`;
     const optimisticMsg = {
       _id: tempId,
@@ -363,6 +742,14 @@ export default function ChatPage() {
 
   const onTyping = (value) => {
     setDraft(value);
+    if (selectedGroup && socketRef.current) {
+      socketRef.current.emit("group_typing", { groupId: selectedGroup._id, isTyping: true });
+      clearTimeout(typingTimerRef.current);
+      typingTimerRef.current = setTimeout(() => {
+        socketRef.current?.emit("group_typing", { groupId: selectedGroup._id, isTyping: false });
+      }, 600);
+      return;
+    }
     if (!selectedUser || !socketRef.current) return;
 
     socketRef.current.emit("typing", { receiverId: selectedUser._id, isTyping: true });
@@ -523,6 +910,9 @@ export default function ChatPage() {
             <span className="sidebar-username">{user?.username}</span>
           </div>
           <div className="sidebar-header-actions">
+            <button className="icon-btn" onClick={() => setShowCreateGroup(true)} type="button" title="New Group">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M16.5 13c-1.2 0-3.07.34-4.5 1-1.43-.67-3.3-1-4.5-1C5.33 13 1 14.08 1 16.25V19h22v-2.75C23 14.08 18.67 13 16.5 13zM9 12c1.93 0 3.5-1.57 3.5-3.5S10.93 5 9 5 5.5 6.57 5.5 8.5 7.07 12 9 12zm6 0c1.93 0 3.5-1.57 3.5-3.5S16.93 5 15 5s-3.5 1.57-3.5 3.5S13.07 12 15 12z"/></svg>
+            </button>
             <button className="icon-btn" onClick={logout} type="button" title="Logout">
               <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M16 13v-2H7V8l-5 4 5 4v-3z"/><path d="M20 3h-9c-1.103 0-2 .897-2 2v4h2V5h9v14h-9v-4H9v4c0 1.103.897 2 2 2h9c1.103 0 2-.897 2-2V5c0-1.103-.897-2-2-2z"/></svg>
             </button>
@@ -599,6 +989,39 @@ export default function ChatPage() {
               </div>
             );
           })}
+
+          {/* ── Group Items ── */}
+          {groups.length > 0 && (
+            <div className="sidebar-section-label">GROUPS</div>
+          )}
+          {groups.map((group) => {
+            const lastMsg = group.lastMessage;
+            const lastMsgPreview = lastMsg
+              ? (lastMsg.senderId?.username ? `${lastMsg.senderId.username}: ` : "") + (lastMsg.messageContent || "").slice(0, 30)
+              : "";
+            return (
+              <div
+                key={group._id}
+                className={`contact-item ${selectedGroup?._id === group._id ? "active" : ""}`}
+                onClick={() => openGroupConversation(group)}
+              >
+                <div className="contact-avatar">
+                  <div className="group-avatar-icon">
+                    <svg viewBox="0 0 24 24" width="28" height="28" fill="#aebac1"><path d="M16.5 13c-1.2 0-3.07.34-4.5 1-1.43-.67-3.3-1-4.5-1C5.33 13 1 14.08 1 16.25V19h22v-2.75C23 14.08 18.67 13 16.5 13zM9 12c1.93 0 3.5-1.57 3.5-3.5S10.93 5 9 5 5.5 6.57 5.5 8.5 7.07 12 9 12zm6 0c1.93 0 3.5-1.57 3.5-3.5S16.93 5 15 5s-3.5 1.57-3.5 3.5S13.07 12 15 12z"/></svg>
+                  </div>
+                </div>
+                <div className="contact-info">
+                  <div className="contact-info-top">
+                    <span className="contact-name">{group.name}</span>
+                  </div>
+                  <div className="contact-info-bottom">
+                    <span className="contact-last-msg">{lastMsgPreview || `${group.members?.length || 0} participants`}</span>
+                    {(group.unreadCount || 0) > 0 && <span className="unread-badge">{group.unreadCount}</span>}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
         </div>
       </aside>
 
@@ -638,7 +1061,7 @@ export default function ChatPage() {
 
       {/* ── Conversation ─────────────────────── */}
       <main className="conversation">
-        {!selectedUser && (
+        {!selectedUser && !selectedGroup && (
           <div className="empty-state">
             <div className="empty-state-icon-wrap">
               <svg viewBox="0 0 303 172" width="250" fill="none"><path d="M229.565 160.229c32.647-16.593 55.043-51.632 55.043-91.871 0-57.033-50.071-86.3-107.107-67.067C124.035-18.027 41.445-4.813 12.487 50.569-5.244 85.456 5.49 126.969 31.614 150.162" stroke="#00a884" strokeWidth="1.5" opacity=".35"/><circle cx="152" cy="86" r="65" stroke="#00a884" strokeWidth="1.5" opacity=".2"/><path d="M152 54c-17.673 0-32 14.327-32 32 0 6.016 1.66 11.64 4.547 16.453L121 118l16.12-4.227A31.824 31.824 0 00152 118c17.673 0 32-14.327 32-32s-14.327-32-32-32z" fill="#00a884" opacity=".15"/><path d="M152 54c-17.673 0-32 14.327-32 32 0 6.016 1.66 11.64 4.547 16.453L121 118l16.12-4.227A31.824 31.824 0 00152 118c17.673 0 32-14.327 32-32s-14.327-32-32-32z" stroke="#00a884" strokeWidth="1.5"/></svg>
@@ -652,8 +1075,9 @@ export default function ChatPage() {
           </div>
         )}
 
-        {selectedUser && (
+        {(selectedUser || selectedGroup) && (
           <>
+            {selectedUser && (
             <header className="chat-header">
               <div className="chat-header-left" onClick={() => setShowContactInfo(!showContactInfo)}>
                 <div className="chat-header-avatar">
@@ -670,11 +1094,18 @@ export default function ChatPage() {
                 </div>
               </div>
               <div className="chat-header-actions">
+                <button className="icon-btn" onClick={() => initiateCall(selectedUser, 'audio')} title="Audio call">
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>
+                </button>
+                <button className="icon-btn" onClick={() => initiateCall(selectedUser, 'video')} title="Video call">
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>
+                </button>
                 <button className="icon-btn" onClick={() => { setShowMsgSearch(!showMsgSearch); setMsgSearch(""); }} title="Search">
                   <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M15.009 13.805h-.636l-.22-.219a5.184 5.184 0 001.257-3.386 5.207 5.207 0 10-5.207 5.208 5.183 5.183 0 003.385-1.258l.22.22v.635l4.004 3.999 1.194-1.195-3.997-4.004zm-4.806 0a3.6 3.6 0 110-7.202 3.6 3.6 0 010 7.202z"/></svg>
                 </button>
               </div>
             </header>
+            )}
 
             {showMsgSearch && (
               <div className="msg-search-bar">
@@ -926,6 +1357,88 @@ export default function ChatPage() {
       )}
 
       {error && <div className="toast">{error}</div>}
+
+      {/* ── Group Conversation Header + Panel ── */}
+      {selectedGroup && (
+        <>
+          <header className="chat-header" style={{ position: 'absolute', top: 0, left: 'var(--sidebar-width, 380px)', right: showGroupInfo ? '340px' : 0, zIndex: 5 }}>
+            <div className="chat-header-left" onClick={() => setShowGroupInfo(!showGroupInfo)}>
+              <div className="chat-header-avatar">
+                <div className="group-avatar-icon" style={{ width: 40, height: 40 }}>
+                  <svg viewBox="0 0 24 24" width="24" height="24" fill="#aebac1"><path d="M16.5 13c-1.2 0-3.07.34-4.5 1-1.43-.67-3.3-1-4.5-1C5.33 13 1 14.08 1 16.25V19h22v-2.75C23 14.08 18.67 13 16.5 13zM9 12c1.93 0 3.5-1.57 3.5-3.5S10.93 5 9 5 5.5 6.57 5.5 8.5 7.07 12 9 12zm6 0c1.93 0 3.5-1.57 3.5-3.5S16.93 5 15 5s-3.5 1.57-3.5 3.5S13.07 12 15 12z"/></svg>
+                </div>
+              </div>
+              <div className="chat-header-info">
+                <h2>{selectedGroup.name}</h2>
+                <p className={typingLabel ? "typing-text" : ""}>
+                  {typingLabel || `${selectedGroup.members?.length || 0} participants`}
+                </p>
+              </div>
+            </div>
+            <div className="chat-header-actions">
+              <button className="icon-btn" onClick={() => initiateGroupCall(selectedGroup, 'audio')} title="Audio call">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>
+              </button>
+              <button className="icon-btn" onClick={() => initiateGroupCall(selectedGroup, 'video')} title="Video call">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>
+              </button>
+            </div>
+          </header>
+        </>
+      )}
+
+      {/* ── Group Info Panel ── */}
+      {showGroupInfo && selectedGroup && (
+        <GroupInfoPanel
+          group={selectedGroup}
+          currentUserId={user._id}
+          onClose={() => setShowGroupInfo(false)}
+          onRemoveMember={onRemoveGroupMember}
+          onLeaveGroup={onLeaveGroup}
+          socketBaseUrl={SOCKET_BASE_URL}
+        />
+      )}
+
+      {/* ── 1:1 Call Overlay ── */}
+      <CallOverlay
+        callState={callState}
+        callType={callType}
+        peerName={callPeer?.username}
+        peerPicture={callPeer?.profilePicture}
+        localStream={localStream}
+        remoteStream={remoteStream}
+        onAccept={acceptCall}
+        onReject={rejectCall}
+        onEnd={endCall}
+        onToggleMute={() => webrtc.toggleMute()}
+        onToggleVideo={() => webrtc.toggleVideo()}
+        socketBaseUrl={SOCKET_BASE_URL}
+      />
+
+      {/* ── Group Call Overlay ── */}
+      <GroupCallOverlay
+        callState={groupCallState}
+        callType={groupCallType}
+        groupName={groups.find((g) => g._id === groupCallGroupId)?.name || "Group"}
+        callerName={callPeer?.username}
+        participants={groupCallParticipants}
+        localStream={groupCallLocalStream}
+        onAccept={acceptGroupCall}
+        onReject={rejectGroupCall}
+        onEnd={endGroupCall}
+        onToggleMute={() => webrtc.toggleMute()}
+        onToggleVideo={() => webrtc.toggleVideo()}
+        socketBaseUrl={SOCKET_BASE_URL}
+      />
+
+      {/* ── Create Group Dialog ── */}
+      {showCreateGroup && (
+        <CreateGroupDialog
+          friends={friends}
+          onClose={() => setShowCreateGroup(false)}
+          onCreate={onCreateGroup}
+        />
+      )}
     </div>
   );
 }

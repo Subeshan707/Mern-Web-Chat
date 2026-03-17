@@ -34,4 +34,16 @@ export const api = {
   toggleStar: (messageId) => http.put(`/messages/star/${messageId}`),
   searchMessages: (userId, query) =>
     http.get(`/messages/search/${userId}?q=${encodeURIComponent(query)}`),
+
+  // ── Group APIs ──
+  createGroup: (payload) => http.post("/groups", payload),
+  getGroups: () => http.get("/groups"),
+  getGroupDetails: (groupId) => http.get(`/groups/${groupId}`),
+  updateGroup: (groupId, payload) => http.put(`/groups/${groupId}`, payload),
+  addGroupMembers: (groupId, memberIds) =>
+    http.post(`/groups/${groupId}/members`, { memberIds }),
+  removeGroupMember: (groupId, userId) =>
+    http.delete(`/groups/${groupId}/members/${userId}`),
+  getGroupMessages: (groupId, page = 1, limit = 50) =>
+    http.get(`/groups/${groupId}/messages?page=${page}&limit=${limit}`),
 };

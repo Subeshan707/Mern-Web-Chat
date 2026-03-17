@@ -1,0 +1,179 @@
+import { useRef, useCallback, useEffect } from "react";
+
+const ICE_SERVERS = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+  ],
+};
+
+export function useWebRTC(socketRef) {
+  const pcRef = useRef(null);
+  const localStreamRef = useRef(null);
+  const remoteStreamRef = useRef(null);
+  const pendingCandidatesRef = useRef([]);
+
+  const createPeerConnection = useCallback((onRemoteStream) => {
+    const pc = new RTCPeerConnection(ICE_SERVERS);
+
+    pc.onicecandidate = (e) => {
+      if (e.candidate && socketRef.current?._callTarget) {
+        socketRef.current.emit("webrtc_ice_candidate", {
+          targetId: socketRef.current._callTarget,
+          candidate: e.candidate,
+        });
+      }
+    };
+
+    pc.ontrack = (e) => {
+      if (!remoteStreamRef.current) {
+        remoteStreamRef.current = new MediaStream();
+      }
+      remoteStreamRef.current.addTrack(e.track);
+      onRemoteStream?.(remoteStreamRef.current);
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      if (pc.iceConnectionState === "failed") {
+        pc.restartIce();
+      }
+    };
+
+    pcRef.current = pc;
+    return pc;
+  }, [socketRef]);
+
+  const getLocalStream = useCallback(async (video = true) => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: video ? { width: { ideal: 640 }, height: { ideal: 480 } } : false,
+      });
+      localStreamRef.current = stream;
+      return stream;
+    } catch (err) {
+      console.error("getUserMedia error:", err);
+      // Fallback to audio only if video fails
+      if (video) {
+        const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        localStreamRef.current = audioStream;
+        return audioStream;
+      }
+      throw err;
+    }
+  }, []);
+
+  const startCall = useCallback(async (targetId, video, onRemoteStream) => {
+    const stream = await getLocalStream(video);
+    const pc = createPeerConnection(onRemoteStream);
+
+    stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+
+    if (socketRef.current) socketRef.current._callTarget = targetId;
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    socketRef.current?.emit("webrtc_offer", { targetId, offer });
+
+    return stream;
+  }, [getLocalStream, createPeerConnection, socketRef]);
+
+  const answerCall = useCallback(async (callerId, offer, video, onRemoteStream) => {
+    const stream = await getLocalStream(video);
+    const pc = createPeerConnection(onRemoteStream);
+
+    stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+
+    if (socketRef.current) socketRef.current._callTarget = callerId;
+
+    await pc.setRemoteDescription(new RTCSessionDescription(offer));
+
+    // Apply any pending ICE candidates
+    for (const c of pendingCandidatesRef.current) {
+      try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch {}
+    }
+    pendingCandidatesRef.current = [];
+
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+
+    socketRef.current?.emit("webrtc_answer", { targetId: callerId, answer });
+
+    return stream;
+  }, [getLocalStream, createPeerConnection, socketRef]);
+
+  const handleAnswer = useCallback(async (answer) => {
+    if (pcRef.current && pcRef.current.signalingState !== "stable") {
+      await pcRef.current.setRemoteDescription(new RTCSessionDescription(answer));
+
+      for (const c of pendingCandidatesRef.current) {
+        try { await pcRef.current.addIceCandidate(new RTCIceCandidate(c)); } catch {}
+      }
+      pendingCandidatesRef.current = [];
+    }
+  }, []);
+
+  const handleIceCandidate = useCallback(async (candidate) => {
+    if (pcRef.current && pcRef.current.remoteDescription) {
+      try { await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate)); } catch {}
+    } else {
+      pendingCandidatesRef.current.push(candidate);
+    }
+  }, []);
+
+  const toggleMute = useCallback(() => {
+    const stream = localStreamRef.current;
+    if (!stream) return false;
+    const audioTrack = stream.getAudioTracks()[0];
+    if (audioTrack) {
+      audioTrack.enabled = !audioTrack.enabled;
+      return !audioTrack.enabled; // true = muted
+    }
+    return false;
+  }, []);
+
+  const toggleVideo = useCallback(() => {
+    const stream = localStreamRef.current;
+    if (!stream) return false;
+    const videoTrack = stream.getVideoTracks()[0];
+    if (videoTrack) {
+      videoTrack.enabled = !videoTrack.enabled;
+      return !videoTrack.enabled; // true = video off
+    }
+    return true;
+  }, []);
+
+  const cleanup = useCallback(() => {
+    localStreamRef.current?.getTracks().forEach((track) => track.stop());
+    remoteStreamRef.current = null;
+    localStreamRef.current = null;
+
+    if (pcRef.current) {
+      pcRef.current.close();
+      pcRef.current = null;
+    }
+    pendingCandidatesRef.current = [];
+
+    if (socketRef.current) delete socketRef.current._callTarget;
+  }, [socketRef]);
+
+  useEffect(() => {
+    return () => cleanup();
+  }, [cleanup]);
+
+  return {
+    localStreamRef,
+    remoteStreamRef,
+    pcRef,
+    startCall,
+    answerCall,
+    handleAnswer,
+    handleIceCandidate,
+    toggleMute,
+    toggleVideo,
+    cleanup,
+    getLocalStream,
+    createPeerConnection,
+  };
+}
