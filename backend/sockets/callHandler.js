@@ -3,8 +3,11 @@ module.exports = (io, socket) => {
 
   // Initiate a call
   socket.on('call_initiate', ({ calleeId, callType, callerInfo }) => {
-    io.to(calleeId).emit('call_incoming', {
-      callerId: socket.user._id,
+    const calleeRoom = calleeId?.toString();
+    if (!calleeRoom) return;
+
+    io.to(calleeRoom).emit('call_incoming', {
+      callerId: socket.user._id.toString(),
       callerName: socket.user.username,
       callerPicture: socket.user.profilePicture,
       callType, // 'audio' or 'video'
@@ -14,47 +17,65 @@ module.exports = (io, socket) => {
 
   // Accept a call
   socket.on('call_accept', ({ callerId }) => {
-    io.to(callerId).emit('call_accepted', {
-      acceptedBy: socket.user._id,
+    const callerRoom = callerId?.toString();
+    if (!callerRoom) return;
+
+    io.to(callerRoom).emit('call_accepted', {
+      acceptedBy: socket.user._id.toString(),
       acceptedByName: socket.user.username
     });
   });
 
   // Reject a call
   socket.on('call_reject', ({ callerId, reason }) => {
-    io.to(callerId).emit('call_rejected', {
-      rejectedBy: socket.user._id,
+    const callerRoom = callerId?.toString();
+    if (!callerRoom) return;
+
+    io.to(callerRoom).emit('call_rejected', {
+      rejectedBy: socket.user._id.toString(),
       reason: reason || 'declined'
     });
   });
 
   // End a call
   socket.on('call_end', ({ peerId }) => {
-    io.to(peerId).emit('call_ended', {
-      endedBy: socket.user._id
+    const peerRoom = peerId?.toString();
+    if (!peerRoom) return;
+
+    io.to(peerRoom).emit('call_ended', {
+      endedBy: socket.user._id.toString()
     });
   });
 
   // WebRTC signaling: offer
   socket.on('webrtc_offer', ({ targetId, offer }) => {
-    io.to(targetId).emit('webrtc_offer', {
-      fromId: socket.user._id,
+    const targetRoom = targetId?.toString();
+    if (!targetRoom) return;
+
+    io.to(targetRoom).emit('webrtc_offer', {
+      fromId: socket.user._id.toString(),
       offer
     });
   });
 
   // WebRTC signaling: answer
   socket.on('webrtc_answer', ({ targetId, answer }) => {
-    io.to(targetId).emit('webrtc_answer', {
-      fromId: socket.user._id,
+    const targetRoom = targetId?.toString();
+    if (!targetRoom) return;
+
+    io.to(targetRoom).emit('webrtc_answer', {
+      fromId: socket.user._id.toString(),
       answer
     });
   });
 
   // WebRTC signaling: ICE candidate
   socket.on('webrtc_ice_candidate', ({ targetId, candidate }) => {
-    io.to(targetId).emit('webrtc_ice_candidate', {
-      fromId: socket.user._id,
+    const targetRoom = targetId?.toString();
+    if (!targetRoom) return;
+
+    io.to(targetRoom).emit('webrtc_ice_candidate', {
+      fromId: socket.user._id.toString(),
       candidate
     });
   });

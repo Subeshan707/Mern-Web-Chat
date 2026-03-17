@@ -1,11 +1,31 @@
 import { useRef, useCallback, useEffect } from "react";
 
-const ICE_SERVERS = {
-  iceServers: [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-  ],
-};
+const defaultStunServers = [
+  "stun:stun.l.google.com:19302",
+  "stun:stun1.l.google.com:19302",
+];
+
+const envStunServers = (import.meta.env.VITE_STUN_URLS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const turnUrls = (import.meta.env.VITE_TURN_URLS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const turnUsername = import.meta.env.VITE_TURN_USERNAME;
+const turnCredential = import.meta.env.VITE_TURN_CREDENTIAL;
+
+const iceServers = [
+  ...(envStunServers.length ? envStunServers : defaultStunServers).map((urls) => ({ urls })),
+  ...(turnUrls.length && turnUsername && turnCredential
+    ? [{ urls: turnUrls, username: turnUsername, credential: turnCredential }]
+    : []),
+];
+
+const ICE_SERVERS = { iceServers };
 
 export function useWebRTC(socketRef) {
   const pcRef = useRef(null);

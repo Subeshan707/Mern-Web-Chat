@@ -16,6 +16,7 @@ export default function CallOverlay({
 }) {
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
+  const remoteAudioRef = useRef(null);
   const [muted, setMuted] = useState(false);
   const [videoOff, setVideoOff] = useState(callType === "audio");
   const [elapsed, setElapsed] = useState(0);
@@ -31,6 +32,17 @@ export default function CallOverlay({
   useEffect(() => {
     if (remoteVideoRef.current && remoteStream) {
       remoteVideoRef.current.srcObject = remoteStream;
+    }
+  }, [remoteStream]);
+
+  // Audio calls need an explicit audio sink or remote sound will never play.
+  useEffect(() => {
+    if (remoteAudioRef.current && remoteStream) {
+      remoteAudioRef.current.srcObject = remoteStream;
+      const playPromise = remoteAudioRef.current.play();
+      if (playPromise && typeof playPromise.catch === "function") {
+        playPromise.catch(() => {});
+      }
     }
   }, [remoteStream]);
 
@@ -68,6 +80,10 @@ export default function CallOverlay({
           playsInline
           className="call-remote-video"
         />
+      )}
+
+      {callState === "connected" && remoteStream && (
+        <audio ref={remoteAudioRef} autoPlay playsInline />
       )}
 
       {/* Local video (PiP) */}
