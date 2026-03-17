@@ -65,14 +65,19 @@ export function useWebRTC(socketRef) {
     };
 
     pc.ontrack = (e) => {
-      // Always create a NEW MediaStream so React detects a new reference
-      const stream = new MediaStream();
-      // Gather all tracks from all receivers to ensure we get both audio + video
-      pc.getReceivers().forEach((receiver) => {
-        if (receiver.track) {
-          stream.addTrack(receiver.track);
-        }
-      });
+      // Prefer the native remote stream from the track event when available.
+      const eventStream = e.streams && e.streams[0];
+      if (eventStream) {
+        remoteStreamRef.current = eventStream;
+        onRemoteStreamCbRef.current?.(eventStream);
+        return;
+      }
+
+      // Fallback for browsers that do not include e.streams.
+      const stream = remoteStreamRef.current || new MediaStream();
+      if (!stream.getTracks().some((t) => t.id === e.track.id)) {
+        stream.addTrack(e.track);
+      }
       remoteStreamRef.current = stream;
       onRemoteStreamCbRef.current?.(stream);
     };

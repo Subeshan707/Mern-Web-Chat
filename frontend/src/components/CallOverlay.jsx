@@ -32,6 +32,10 @@ export default function CallOverlay({
   useEffect(() => {
     if (remoteVideoRef.current && remoteStream) {
       remoteVideoRef.current.srcObject = remoteStream;
+      const playPromise = remoteVideoRef.current.play();
+      if (playPromise && typeof playPromise.catch === "function") {
+        playPromise.catch(() => {});
+      }
     }
   }, [remoteStream]);
 

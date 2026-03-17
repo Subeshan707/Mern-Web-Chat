@@ -261,7 +261,11 @@ export default function ChatPage() {
     socket.on("call_accepted", async ({ acceptedBy }) => {
       setCallState("connected");
       try {
-        await webrtc.sendOffer(acceptedBy);
+        const targetId = acceptedBy || callPeerRef.current?._id;
+        if (!targetId) {
+          throw new Error("Missing callee ID for offer");
+        }
+        await webrtc.sendOffer(targetId);
       } catch (err) {
         console.error("Failed to send offer after acceptance:", err);
       }
