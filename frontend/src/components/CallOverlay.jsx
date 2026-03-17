@@ -72,19 +72,19 @@ export default function CallOverlay({
     <div className="call-overlay">
       <div className="call-overlay-bg" />
 
-      {/* Remote video (full screen background) */}
-      {callState === "connected" && callType === "video" && (
-        <video
-          ref={remoteVideoRef}
-          autoPlay
-          playsInline
-          className="call-remote-video"
-        />
-      )}
+      {/* Remote video (full screen background) — always in DOM so stream attaches immediately */}
+      <video
+        ref={remoteVideoRef}
+        autoPlay
+        playsInline
+        className="call-remote-video"
+        style={{
+          display: callState === "connected" && callType === "video" && remoteStream ? "block" : "none",
+        }}
+      />
 
-      {callState === "connected" && remoteStream && (
-        <audio ref={remoteAudioRef} autoPlay playsInline />
-      )}
+      {/* Always-present audio sink for remote audio */}
+      <audio ref={remoteAudioRef} autoPlay playsInline style={{ display: "none" }} />
 
       {/* Local video (PiP) */}
       {localStream && callType === "video" && !videoOff && (

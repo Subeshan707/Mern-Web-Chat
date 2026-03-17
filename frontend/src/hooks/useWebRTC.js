@@ -20,6 +20,22 @@ const turnCredential = import.meta.env.VITE_TURN_CREDENTIAL;
 
 const iceServers = [
   ...(envStunServers.length ? envStunServers : defaultStunServers).map((urls) => ({ urls })),
+  // Free Open Relay TURN servers for NAT traversal
+  {
+    urls: "turn:openrelay.metered.ca:80",
+    username: "openrelayproject",
+    credential: "openrelayproject",
+  },
+  {
+    urls: "turn:openrelay.metered.ca:443",
+    username: "openrelayproject",
+    credential: "openrelayproject",
+  },
+  {
+    urls: "turn:openrelay.metered.ca:443?transport=tcp",
+    username: "openrelayproject",
+    credential: "openrelayproject",
+  },
   ...(turnUrls.length && turnUsername && turnCredential
     ? [{ urls: turnUrls, username: turnUsername, credential: turnCredential }]
     : []),
@@ -32,9 +48,12 @@ export function useWebRTC(socketRef) {
   const localStreamRef = useRef(null);
   const remoteStreamRef = useRef(null);
   const pendingCandidatesRef = useRef([]);
+  // Callback ref so we can invoke it whenever we need to push a new remote stream
+  const onRemoteStreamCbRef = useRef(null);
 
   const createPeerConnection = useCallback((onRemoteStream) => {
     const pc = new RTCPeerConnection(ICE_SERVERS);
+    onRemoteStreamCbRef.current = onRemoteStream;
 
     pc.onicecandidate = (e) => {
       if (e.candidate && socketRef.current?._callTarget) {
@@ -46,17 +65,27 @@ export function useWebRTC(socketRef) {
     };
 
     pc.ontrack = (e) => {
-      if (!remoteStreamRef.current) {
-        remoteStreamRef.current = new MediaStream();
-      }
-      remoteStreamRef.current.addTrack(e.track);
-      onRemoteStream?.(remoteStreamRef.current);
+      // Always create a NEW MediaStream so React detects a new reference
+      const stream = new MediaStream();
+      // Gather all tracks from all receivers to ensure we get both audio + video
+      pc.getReceivers().forEach((receiver) => {
+        if (receiver.track) {
+          stream.addTrack(receiver.track);
+        }
+      });
+      remoteStreamRef.current = stream;
+      onRemoteStreamCbRef.current?.(stream);
     };
 
     pc.oniceconnectionstatechange = () => {
+      console.log("[WebRTC] ICE state:", pc.iceConnectionState);
       if (pc.iceConnectionState === "failed") {
         pc.restartIce();
       }
+    };
+
+    pc.onconnectionstatechange = () => {
+      console.log("[WebRTC] Connection state:", pc.connectionState);
     };
 
     pcRef.current = pc;
@@ -83,21 +112,31 @@ export function useWebRTC(socketRef) {
     }
   }, []);
 
-  const startCall = useCallback(async (targetId, video, onRemoteStream) => {
+  // ─── Caller side: prepare local stream + PC, but do NOT send offer yet ───
+  const prepareCall = useCallback(async (targetId, video, onRemoteStream) => {
     const stream = await getLocalStream(video);
     const pc = createPeerConnection(onRemoteStream);
-
     stream.getTracks().forEach((track) => pc.addTrack(track, stream));
-
     if (socketRef.current) socketRef.current._callTarget = targetId;
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-
-    socketRef.current?.emit("webrtc_offer", { targetId, offer });
-
     return stream;
   }, [getLocalStream, createPeerConnection, socketRef]);
+
+  // ─── Caller side: send the offer (called only after callee accepts) ───
+  const sendOffer = useCallback(async (targetId) => {
+    const pc = pcRef.current;
+    if (!pc) return;
+    if (socketRef.current) socketRef.current._callTarget = targetId;
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    socketRef.current?.emit("webrtc_offer", { targetId, offer });
+  }, [socketRef]);
+
+  // ─── Legacy startCall (kept for backward compat but now calls prepareCall + sendOffer) ───
+  const startCall = useCallback(async (targetId, video, onRemoteStream) => {
+    const stream = await prepareCall(targetId, video, onRemoteStream);
+    await sendOffer(targetId);
+    return stream;
+  }, [prepareCall, sendOffer]);
 
   const answerCall = useCallback(async (callerId, offer, video, onRemoteStream) => {
     const stream = await getLocalStream(video);
@@ -168,6 +207,7 @@ export function useWebRTC(socketRef) {
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
     remoteStreamRef.current = null;
     localStreamRef.current = null;
+    onRemoteStreamCbRef.current = null;
 
     if (pcRef.current) {
       pcRef.current.close();
@@ -186,6 +226,8 @@ export function useWebRTC(socketRef) {
     localStreamRef,
     remoteStreamRef,
     pcRef,
+    prepareCall,
+    sendOffer,
     startCall,
     answerCall,
     handleAnswer,

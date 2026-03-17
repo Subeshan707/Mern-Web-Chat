@@ -111,6 +111,8 @@ export default function ChatPage() {
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
   const incomingOfferRef = useRef(null);
+  const callTypeRef = useRef('audio');
+  const callPeerRef = useRef(null);
 
   // ── Group call states ──
   const [groupCallState, setGroupCallState] = useState(null);
@@ -255,8 +257,14 @@ export default function ChatPage() {
       setCallState("incoming");
     });
 
-    socket.on("call_accepted", () => {
+    // Caller receives this after callee accepts → NOW send the WebRTC offer
+    socket.on("call_accepted", async ({ acceptedBy }) => {
       setCallState("connected");
+      try {
+        await webrtc.sendOffer(acceptedBy);
+      } catch (err) {
+        console.error("Failed to send offer after acceptance:", err);
+      }
     });
 
     socket.on("call_rejected", () => {
@@ -275,8 +283,16 @@ export default function ChatPage() {
       setRemoteStream(null);
     });
 
-    socket.on("webrtc_offer", ({ fromId, offer }) => {
+    // Callee receives the offer AFTER they already accepted
+    socket.on("webrtc_offer", async ({ fromId, offer }) => {
       incomingOfferRef.current = offer;
+      // Auto-answer: callee has already accepted, so answer the WebRTC offer now
+      try {
+        const stream = await webrtc.answerCall(fromId, offer, callTypeRef.current === "video", (rs) => setRemoteStream(rs));
+        setLocalStream(stream);
+      } catch (err) {
+        console.error("Auto-answer error:", err);
+      }
     });
 
     socket.on("webrtc_answer", ({ answer }) => {
@@ -456,6 +472,8 @@ export default function ChatPage() {
   // Keep refs in sync
   useEffect(() => { selectedGroupRef.current = selectedGroup; }, [selectedGroup]);
   useEffect(() => { groupCallGroupIdRef.current = groupCallGroupId; }, [groupCallGroupId]);
+  useEffect(() => { callTypeRef.current = callType; }, [callType]);
+  useEffect(() => { callPeerRef.current = callPeer; }, [callPeer]);
 
   const openGroupConversation = async (group) => {
     setSelectedUser(null);
@@ -522,7 +540,9 @@ export default function ChatPage() {
     setCallType(type);
     setCallState("outgoing");
     try {
-      const stream = await webrtc.startCall(peer._id, type === "video", (rs) => setRemoteStream(rs));
+      // Prepare local media + peer connection, but DON'T send the offer yet.
+      // The offer is sent only after the callee accepts (see call_accepted handler).
+      const stream = await webrtc.prepareCall(peer._id, type === "video", (rs) => setRemoteStream(rs));
       setLocalStream(stream);
       socketRef.current?.emit("call_initiate", {
         calleeId: peer._id,
@@ -538,19 +558,9 @@ export default function ChatPage() {
 
   const acceptCall = async () => {
     try {
-      const offer = incomingOfferRef.current;
-      // Wait briefly for the offer to arrive if it hasn't yet
-      if (!offer) {
-        await new Promise((r) => setTimeout(r, 500));
-      }
-      const finalOffer = incomingOfferRef.current;
-      if (!finalOffer) {
-        setError("Call failed – no offer received.");
-        setCallState(null);
-        return;
-      }
-      const stream = await webrtc.answerCall(callPeer._id, finalOffer, callType === "video", (rs) => setRemoteStream(rs));
-      setLocalStream(stream);
+      // Tell the caller we accepted → they will send the WebRTC offer.
+      // The actual WebRTC answer + local stream setup happens in the
+      // webrtc_offer socket listener when the caller's offer arrives.
       socketRef.current?.emit("call_accept", { callerId: callPeer._id });
       setCallState("connected");
       incomingOfferRef.current = null;
